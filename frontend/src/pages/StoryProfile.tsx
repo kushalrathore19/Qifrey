@@ -11,6 +11,7 @@ import {
   Play,
   CheckCircle2,
   BookOpen,
+  PenSquare,
 } from "lucide-react";
 import {
   getStory,
@@ -147,6 +148,14 @@ export const StoryProfile: React.FC = () => {
                 <span>Graph up to date</span>
               </div>
             )}
+
+          <Link
+            to={`/stories/${storyId}/edit`}
+            className="px-3.5 py-2 rounded-xl border border-stone-200 dark:border-stone-700 bg-white dark:bg-stone-800 hover:bg-stone-100 dark:hover:bg-stone-700 text-stone-700 dark:text-stone-200 text-sm font-medium shadow-sm flex items-center gap-2 transition-all"
+          >
+            <PenSquare className="w-4 h-4 text-stone-500 dark:text-stone-400" />
+            <span>Open in editor</span>
+          </Link>
 
           <button
             onClick={() => analyzeMutation.mutate()}

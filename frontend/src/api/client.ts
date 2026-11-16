@@ -79,6 +79,15 @@ export interface Issue {
   created_at: string;
 }
 
+export interface GrammarIssue {
+  message: string;
+  rule_id: string;
+  span_start: number;
+  span_end: number;
+  quote: string;
+  suggestions: string[];
+}
+
 export interface AnalysisStatus {
   story_id: number;
   status: "idle" | "running" | "completed" | "failed";
@@ -189,5 +198,46 @@ export async function updateIssueStatus(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status }),
+  });
+}
+
+export async function createChapter(
+  storyId: number,
+  data?: { title?: string; text?: string; index?: number },
+): Promise<Chapter> {
+  return request<Chapter>(`/stories/${storyId}/chapters`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data || {}),
+  });
+}
+
+export async function updateChapter(
+  chapterId: number,
+  data: { title?: string; text?: string; index?: number },
+): Promise<Chapter> {
+  return request<Chapter>(`/chapters/${chapterId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteChapter(
+  chapterId: number,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/chapters/${chapterId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function checkChapterGrammar(
+  chapterId: number,
+  text?: string,
+): Promise<GrammarIssue[]> {
+  return request<GrammarIssue[]>(`/chapters/${chapterId}/grammar`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
   });
 }

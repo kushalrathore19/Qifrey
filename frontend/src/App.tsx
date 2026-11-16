@@ -6,6 +6,7 @@ import { ToastProvider } from "./context/ToastContext";
 import { Navbar } from "./components/Navbar";
 import { Library } from "./pages/Library";
 import { StoryProfile } from "./pages/StoryProfile";
+import { Editor } from "./pages/Editor";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -29,6 +30,7 @@ export const App: React.FC = () => {
                 <Routes>
                   <Route path="/" element={<Library />} />
                   <Route path="/stories/:id" element={<StoryProfile />} />
+                  <Route path="/stories/:id/edit" element={<Editor />} />
                 </Routes>
               </div>
             </div>
