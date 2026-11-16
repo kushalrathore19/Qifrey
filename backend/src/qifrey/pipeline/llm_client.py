@@ -250,12 +250,27 @@ class FakeLLMClient(LLMClient):
             if isinstance(item, Exception):
                 raise item
 
-        # Default fallback: construct empty instance
+        # Default fallback: construct empty or dummy instance
         try:
             return schema()
         except ValidationError:
-            # Construct dummy dict if schema has required fields
-            return schema.model_validate({})
+            dummy_data: dict[str, Any] = {}
+            for field_name, field_info in schema.model_fields.items():
+                if field_info.is_required():
+                    ann = field_info.annotation
+                    if ann is str:
+                        dummy_data[field_name] = "dummy"
+                    elif ann is int:
+                        dummy_data[field_name] = 0
+                    elif ann is float:
+                        dummy_data[field_name] = 0.0
+                    elif ann is bool:
+                        dummy_data[field_name] = False
+                    elif getattr(ann, "__origin__", None) is list:
+                        dummy_data[field_name] = []
+                    else:
+                        dummy_data[field_name] = "dummy"
+            return schema.model_validate(dummy_data)
 
 
 _active_llm_client: LLMClient | None = None

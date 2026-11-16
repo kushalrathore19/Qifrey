@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from qifrey.db.models import Chapter, Story
+from qifrey.db.models import Chapter, Issue, Story
 from qifrey.db.session import get_session_factory
+from qifrey.grammar.checker import check_grammar
 from qifrey.graph.alias_resolver import resolve_or_create_character
 from qifrey.graph.store import (
     delete_chapter_data,
@@ -15,6 +17,8 @@ from qifrey.graph.store import (
     upsert_location,
     upsert_relationship,
 )
+from qifrey.insights.contradictions import detect_contradictions
+from qifrey.insights.summarizer import generate_summaries
 from qifrey.pipeline.context_builder import build_memory_block, chunk_chapter_text
 from qifrey.pipeline.llm_client import LLMClient, get_llm_client
 from qifrey.pipeline.prompts import load_prompt
@@ -67,6 +71,10 @@ def analyze_chapter(
 
     # Delete existing facts/relationships for this chapter
     delete_chapter_data(db, chapter.id)
+    # Delete old grammar issues for this chapter
+    db.query(Issue).filter(Issue.chapter_id == chapter.id, Issue.type == "grammar").delete(
+        synchronize_session=False
+    )
     db.commit()
 
     client = llm_client or get_llm_client()
@@ -154,6 +162,24 @@ def analyze_chapter(
 
         db.commit()
 
+    # Run grammar checks for this changed chapter
+    grammar_issues = check_grammar(chapter.text)
+    for g in grammar_issues:
+        db.add(
+            Issue(
+                story_id=story_id,
+                chapter_id=chapter.id,
+                type="grammar",
+                severity="warning",
+                message=g.message,
+                quote=g.quote,
+                span_start=g.span_start,
+                span_end=g.span_end,
+                suggestions_json=json.dumps(g.suggestions),
+                status="open",
+            )
+        )
+
     # Mark chapter as analyzed
     chapter.analyzed_hash = chapter.content_hash
     db.commit()
@@ -185,6 +211,12 @@ def analyze_story(story_id: int, *, llm_client: LLMClient | None = None) -> None
             for idx, ch in enumerate(chapters, start=1):
                 _ANALYSIS_PROGRESS[story_id]["current_chapter"] = idx
                 analyze_chapter(story_id, ch, db, llm_client=llm_client)
+
+            # Post-extraction: detect contradictions across the entire story graph
+            detect_contradictions(story_id, db, llm_client=llm_client)
+
+            # Post-extraction: map-reduce summaries
+            generate_summaries(story_id, db, llm_client=llm_client)
 
             _ANALYSIS_PROGRESS[story_id]["status"] = "completed"
         except Exception as err:
