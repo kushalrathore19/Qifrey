@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -12,14 +14,19 @@ from fastapi import (
     Query,
     UploadFile,
 )
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from qifrey.api.schemas import (
     AnalysisStatusOut,
     ChapterBrief,
+    ChapterCreate,
     ChapterOut,
+    ChapterUpdate,
     CharacterBriefOut,
     CharacterDetailOut,
+    GrammarCheckRequest,
+    GrammarIssueOut,
     IssueOut,
     IssueStatusUpdate,
     MessageOut,
@@ -30,7 +37,12 @@ from qifrey.api.schemas import (
 from qifrey.config import get_settings
 from qifrey.db.models import Chapter, Fact, Issue, Story
 from qifrey.db.session import get_db
-from qifrey.graph.store import get_character_with_facts, list_characters
+from qifrey.grammar.checker import check_grammar
+from qifrey.graph.store import (
+    delete_chapter_data,
+    get_character_with_facts,
+    list_characters,
+)
 from qifrey.ingestion.txt_parser import decode_upload, parse_chapters
 from qifrey.pipeline.runner import analyze_story, get_story_analysis_status
 
@@ -153,6 +165,106 @@ def get_chapter(chapter_id: int, db: Session = Depends(get_db)) -> Chapter:
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found.")
     return chapter
+
+
+@router.post("/stories/{story_id}/chapters", response_model=ChapterOut, status_code=201)
+def create_chapter(
+    story_id: int,
+    body: ChapterCreate,
+    db: Session = Depends(get_db),
+) -> Chapter:
+    story = db.query(Story).filter(Story.id == story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found.")
+
+    if body.index is not None:
+        chapter_index = body.index
+    else:
+        max_idx = db.query(func.max(Chapter.index)).filter(Chapter.story_id == story_id).scalar()
+        chapter_index = 1 if max_idx is None else int(max_idx) + 1
+
+    text = body.text or ""
+    content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    chapter = Chapter(
+        story_id=story_id,
+        index=chapter_index,
+        title=body.title or f"Chapter {chapter_index}",
+        text=text,
+        content_hash=content_hash,
+    )
+    db.add(chapter)
+    db.commit()
+    db.refresh(chapter)
+    return chapter
+
+
+@router.put("/chapters/{chapter_id}", response_model=ChapterOut)
+def update_chapter(
+    chapter_id: int,
+    body: ChapterUpdate,
+    db: Session = Depends(get_db),
+) -> Chapter:
+    chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapter not found.")
+
+    if body.title is not None:
+        chapter.title = body.title
+    if body.index is not None:
+        chapter.index = body.index
+    if body.text is not None:
+        chapter.text = body.text
+        chapter.content_hash = hashlib.sha256(body.text.encode("utf-8")).hexdigest()
+
+    db.commit()
+    db.refresh(chapter)
+    return chapter
+
+
+@router.delete("/chapters/{chapter_id}", response_model=MessageOut)
+def delete_chapter(
+    chapter_id: int,
+    db: Session = Depends(get_db),
+) -> MessageOut:
+    chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapter not found.")
+
+    # Remove graph data provenance
+    delete_chapter_data(db, chapter.id)
+
+    # Remove issues referencing this chapter
+    db.query(Issue).filter(Issue.chapter_id == chapter.id).delete(synchronize_session=False)
+
+    db.delete(chapter)
+    db.commit()
+    return MessageOut(detail=f"Chapter {chapter_id} deleted.")
+
+
+@router.post("/chapters/{chapter_id}/grammar", response_model=list[GrammarIssueOut])
+def check_chapter_grammar_endpoint(
+    chapter_id: int,
+    body: GrammarCheckRequest | None = None,
+    db: Session = Depends(get_db),
+) -> list[GrammarIssueOut]:
+    chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapter not found.")
+
+    text_to_check = body.text if (body and body.text is not None) else chapter.text
+    issues = check_grammar(text_to_check)
+    return [
+        GrammarIssueOut(
+            message=issue.message,
+            rule_id=issue.rule_id,
+            span_start=issue.span_start,
+            span_end=issue.span_end,
+            quote=issue.quote,
+            suggestions=issue.suggestions,
+        )
+        for issue in issues
+    ]
 
 
 @router.post("/stories/{story_id}/analyze", response_model=MessageOut)

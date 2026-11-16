@@ -43,6 +43,7 @@ class ChapterOut(BaseModel):
     text: str
     content_hash: str
     analyzed_hash: str | None = None
+    summary: str | None = None
 
 
 class ChapterBrief(BaseModel):
@@ -54,6 +55,32 @@ class ChapterBrief(BaseModel):
     title: str
     content_hash: str
     analyzed_hash: str | None = None
+    summary: str | None = None
+
+
+class ChapterCreate(BaseModel):
+    title: str = "New Chapter"
+    text: str = ""
+    index: int | None = None
+
+
+class ChapterUpdate(BaseModel):
+    title: str | None = None
+    text: str | None = None
+    index: int | None = None
+
+
+class GrammarCheckRequest(BaseModel):
+    text: str | None = None
+
+
+class GrammarIssueOut(BaseModel):
+    message: str
+    rule_id: str
+    span_start: int
+    span_end: int
+    quote: str
+    suggestions: list[str] = []
 
 
 class MessageOut(BaseModel):

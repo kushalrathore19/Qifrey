@@ -60,12 +60,12 @@ def analyze_chapter(
     db: Session,
     *,
     llm_client: LLMClient | None = None,
-) -> None:
-    """Analyze a single chapter: context -> extract -> validate -> resolve -> store."""
+) -> bool:
+    """Analyze a single chapter. Returns True if analyzed, False if skipped."""
     # Incremental check: if content hash matches analyzed hash, skip
     if chapter.analyzed_hash and chapter.analyzed_hash == chapter.content_hash:
         logger.info("Chapter %d is up to date (hash matches), skipping.", chapter.index)
-        return
+        return False
 
     logger.info("Analyzing Chapter %d: '%s'...", chapter.index, chapter.title)
 
@@ -183,6 +183,7 @@ def analyze_chapter(
     # Mark chapter as analyzed
     chapter.analyzed_hash = chapter.content_hash
     db.commit()
+    return True
 
 
 def analyze_story(story_id: int, *, llm_client: LLMClient | None = None) -> None:
@@ -207,16 +208,17 @@ def analyze_story(story_id: int, *, llm_client: LLMClient | None = None) -> None
             "error": None,
         }
 
+        any_changed = False
         try:
             for idx, ch in enumerate(chapters, start=1):
                 _ANALYSIS_PROGRESS[story_id]["current_chapter"] = idx
-                analyze_chapter(story_id, ch, db, llm_client=llm_client)
+                if analyze_chapter(story_id, ch, db, llm_client=llm_client):
+                    any_changed = True
 
-            # Post-extraction: detect contradictions across the entire story graph
-            detect_contradictions(story_id, db, llm_client=llm_client)
-
-            # Post-extraction: map-reduce summaries
-            generate_summaries(story_id, db, llm_client=llm_client)
+            # Contradictions and summary recomputed only if changed or story has no summary
+            if any_changed or not story.summary:
+                detect_contradictions(story_id, db, llm_client=llm_client)
+                generate_summaries(story_id, db, llm_client=llm_client)
 
             _ANALYSIS_PROGRESS[story_id]["status"] = "completed"
         except Exception as err:
