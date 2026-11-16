@@ -1,48 +1,129 @@
 # Qifrey — Master of Ink and Brush
 
-Qifrey reads a fiction manuscript and builds a living map of characters, facts,
-and contradictions so authors never lose track of their own world.
+> **Drop your manuscript in. Get a living map of every character, fact, and contradiction in your story.**
 
-## Quick Start
+Authors of long fiction frequently lose track of their own worlds: who has which eye color, what happened under which alias, and whether a timeline detail contradicts an earlier chapter. Qifrey reads your manuscript chapter-by-chapter and constructs an incremental, queryable story graph so you never lose consistency.
 
-### Backend
+---
+
+## Screenshots
+
+| Library Catalog | Story Profile & Contradictions |
+| :---: | :---: |
+| ![Library Catalog](docs/screenshots/library.png) | ![Story Profile](docs/screenshots/story_profile.png) |
+
+---
+
+## Features
+
+- **Ingestion & Auto-Chunking:** Ingests raw `.txt` manuscripts, cleans Project Gutenberg boilerplate, auto-detects chapter headings ("Chapter 1", "CHAPTER IV", Roman numerals), and hashes chapters with SHA-256 for incremental processing.
+- **Graph-First Memory:** Extracts canonical characters, aliases, locations, and relationships. Every fact is verified against verbatim source quotes before entering the graph.
+- **Contradiction Adjudicator:** Identifies conflicting physical attributes and backstory facts across chapters, sending candidates to an LLM adjudicator that distinguishes genuine plot errors from legitimate character progression (haircuts, aging, moving house).
+- **Author Control & Human Agency:** Dismiss issues or mark them as intentional; Qifrey remembers your decisions and will never flag the same fact pair again.
+- **Fiction-Friendly Grammar:** Integrated LanguageTool engine preconfigured for creative fiction (disables strict style rules and skips colloquialisms/fragments within dialogue quotes).
+- **Write Mode Editor:** Chapter-by-chapter authoring environment powered by CodeMirror 6 with 1.5-second debounce auto-save, live grammar annotations with click-to-apply replacements, and drag-and-drop chapter reordering.
+- **Incremental Analysis:** Modifying one chapter re-analyzes only that chapter and removes its stale facts, leaving the rest of the manuscript untouched.
+- **Evaluation Harness:** Offline and online evaluation benchmarks comparing extraction accuracy against human-annotated gold standards, naive NER baselines, and synthetic contradiction injection.
+
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart LR
+    Raw[Raw Manuscript .txt] --> Ingest[Ingestion & Content Hashing]
+    Ingest --> GraphStore[(SQLite Story Graph)]
+    GraphStore --> Runner[Context Builder & LLM Extraction]
+    Runner --> Validator[Evidence Quote Validator]
+    Validator --> Resolver[Alias Resolver]
+    Resolver --> Insights[Contradictions & Summaries]
+    Insights --> UI[Writer Workspace & Profile]
+```
+
+For full pipeline diagrams and module breakdowns, see [docs/architecture.md](docs/architecture.md).  
+For architectural choices and trade-offs, see [docs/decisions.md](docs/decisions.md).
+
+---
+
+## Setup & Prerequisites
+
+### Prerequisites
+- **Python:** 3.11+
+- **Node.js:** 20+ and npm
+- **Java:** JRE 11+ (optional, required if running local LanguageTool grammar server; degrades gracefully if absent)
+
+### Environment Variables
+Copy `.env.example` in `backend/` or set the following in your environment:
 
 ```bash
+# LLM Provider & Credentials
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+QIFREY_LLM_PROVIDER=anthropic     # 'anthropic' for live analysis; 'fake' for offline dev/tests
+QIFREY_LLM_MODEL=claude-3-5-sonnet-20241022
+
+# Database & Upload Settings
+QIFREY_DB_PATH=qifrey.db          # Path to SQLite file or ':memory:'
+QIFREY_MAX_UPLOAD_BYTES=5242880   # 5 MB max upload
+```
+
+---
+
+## How to Run
+
+### Option A: Local Development
+
+1. **Backend Server:**
+   ```bash
+   cd backend
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -e ".[dev]"
+   cp .env.example .env
+   uvicorn qifrey.main:app --reload --port 8000
+   ```
+
+2. **Frontend UI:**
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   # Open http://localhost:5173
+   ```
+
+### Option B: Docker Compose (Optional)
+
+```bash
+docker compose up --build
+# Backend available at http://localhost:8000
+# Frontend available at http://localhost:5173
+```
+
+---
+
+## How to Run Tests
+
+Qifrey maintains complete test coverage across every module with mocked LLM calls:
+
+```bash
+# Backend pytest suite (77+ tests)
 cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+.venv/bin/pytest
 
-# Copy and fill in your keys
-cp .env.example .env
+# Backend linting & format check
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
 
-# Run the server
-uvicorn qifrey.main:app --reload --port 8000
+# Frontend linting & build verification
+cd ../frontend
+npm run lint
+npm run build
 ```
 
-### Frontend
+---
 
-```bash
-cd frontend
-npm install
-npm run dev          # → http://localhost:5173
-```
+## How to Evaluate
 
-### Run Tests
-
-```bash
-# Backend
-cd backend
-pytest
-
-# Frontend
-cd frontend
-npm test
-```
-
-### How to Evaluate
-
-Qifrey includes an evaluation harness in `backend/eval/` to evaluate extraction accuracy (precision, recall, F1) across characters, aliases, locations, and facts, benchmark against naive baselines, and test contradiction detection on planted errors:
+Run the evaluation benchmark against the hand-labeled gold standard:
 
 ```bash
 cd backend
@@ -50,37 +131,39 @@ cd backend
 # Run evaluation on gold standard stories (outputs reports to eval/reports/)
 python -m eval.run_eval --gold eval/gold --out eval/reports
 
-# Force offline/fake LLM evaluation (even if an API key is set)
+# Run evaluation offline with FakeLLMClient
 python -m eval.run_eval --gold eval/gold --out eval/reports --fake
 
-# Inject contradictions and legitimate changes into a story to test detector robustness
-python -m eval.inject_contradictions --input eval/gold/example_story.json --out eval/gold/modified.json --key eval/gold/answer_key.json --n 1
+# Programmatically inject contradictions & legitimate changes to test detector accuracy
+python -m eval.inject_contradictions \
+  --input eval/gold/example_story.json \
+  --out eval/gold/injected.json \
+  --key eval/gold/injected_key.json \
+  --n 1
 ```
 
-Reports are written to `eval/reports/<timestamp>.md` and `.csv`, detailing precision/recall/F1, baseline comparisons, token counts, and estimated LLM costs.
+---
 
-## Project Structure
+## Privacy & Manuscript Security
 
-```
-backend/
-  src/qifrey/         # FastAPI application
-    api/               # Route handlers
-    db/                # SQLAlchemy models & session
-    ingestion/         # .txt parsing
-    pipeline/          # LLM extraction (future)
-    graph/             # Story graph logic (future)
-    insights/          # Contradiction detection (future)
-    grammar/           # LanguageTool integration (future)
-  tests/               # pytest test suite
-frontend/
-  src/                 # React + Vite + TypeScript
-docs/
-  PROJECT_BRIEF.md     # Product specification
-```
+- **100% Local Storage:** Manuscripts, chapter text, character details, and story graphs are stored locally on your machine in an SQLite database file.
+- **No Model Training:** When using Anthropic API keys, prompts are sent strictly for stateless inference; your manuscripts are never used for model training or retained in public training corpora.
+- **Air-Gapped Friendly:** When run with local offline LLMs or the mock engine, zero outbound network traffic is generated.
+- **Safe Secrets Handling:** API keys and credentials are read exclusively through environment variables and never logged or persisted into the database.
 
-## Tech Stack
+---
 
-- **Backend:** Python 3.11, FastAPI, SQLAlchemy 2.x, Pydantic v2, SQLite
-- **Frontend:** React, Vite, TypeScript, Tailwind CSS, React Router, TanStack Query
-- **LLM:** Provider interface (Anthropic first)
-- **Grammar:** LanguageTool via language_tool_python
+## Roadmap
+
+- [ ] **Knowledge-State Tracking:** Track which characters know which secrets at each point in the timeline.
+- [ ] **Plot Thread & Subplot Tracking:** Track open narrative questions and unfinished promises across chapter arcs.
+- [ ] **Timeline Reconstruction:** Chronological sequence mapping for non-linear stories and flashbacks.
+- [ ] **Live Writing Assistant:** Real-time character profile card popovers as you write in the editor.
+- [ ] **Graph Database Connector:** Optional Neo4j / Memgraph adapter for complex social network visualizations.
+- [ ] **Local LLM Integration:** First-class support for Ollama and `llama.cpp` for 100% offline, air-gapped authoring.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE). Public domain sample texts are sourced from [Project Gutenberg](https://www.gutenberg.org/) (see [data/samples/README.md](data/samples/README.md)).
