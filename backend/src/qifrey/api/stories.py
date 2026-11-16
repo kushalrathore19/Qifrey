@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from sqlalchemy.orm import Session
 
 from qifrey.api.schemas import (
@@ -11,13 +20,15 @@ from qifrey.api.schemas import (
     ChapterOut,
     CharacterBriefOut,
     CharacterDetailOut,
+    IssueOut,
+    IssueStatusUpdate,
     MessageOut,
     StoryCreate,
     StoryDetail,
     StoryOut,
 )
 from qifrey.config import get_settings
-from qifrey.db.models import Chapter, Fact, Story
+from qifrey.db.models import Chapter, Fact, Issue, Story
 from qifrey.db.session import get_db
 from qifrey.graph.store import get_character_with_facts, list_characters
 from qifrey.ingestion.txt_parser import decode_upload, parse_chapters
@@ -203,3 +214,39 @@ def get_character_detail(
     if not data:
         raise HTTPException(status_code=404, detail="Character not found.")
     return CharacterDetailOut(**data)
+
+
+@router.get("/stories/{story_id}/issues", response_model=list[IssueOut])
+def list_story_issues(
+    story_id: int,
+    type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> list[Issue]:
+    story = db.query(Story).filter(Story.id == story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found.")
+
+    query = db.query(Issue).filter(Issue.story_id == story_id)
+    if type:
+        query = query.filter(Issue.type == type)
+    if status:
+        query = query.filter(Issue.status == status)
+
+    return query.order_by(Issue.created_at.desc()).all()
+
+
+@router.patch("/issues/{issue_id}", response_model=IssueOut)
+def update_issue_status(
+    issue_id: int,
+    body: IssueStatusUpdate,
+    db: Session = Depends(get_db),
+) -> Issue:
+    issue = db.query(Issue).filter(Issue.id == issue_id).first()
+    if not issue:
+        raise HTTPException(status_code=404, detail="Issue not found.")
+
+    issue.status = body.status
+    db.commit()
+    db.refresh(issue)
+    return issue

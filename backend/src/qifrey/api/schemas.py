@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -106,3 +107,25 @@ class AnalysisStatusOut(BaseModel):
     current_chapter: int
     total_chapters: int
     error: str | None = None
+
+
+class IssueOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    story_id: int
+    type: str
+    chapter_id: int | None = None
+    severity: str
+    message: str
+    quote: str | None = None
+    span_start: int | None = None
+    span_end: int | None = None
+    suggestions_json: str | None = None
+    related_fact_ids_json: str | None = None
+    status: str
+    created_at: datetime.datetime
+
+
+class IssueStatusUpdate(BaseModel):
+    status: Literal["open", "dismissed", "accepted", "intentional"]
