@@ -54,6 +54,7 @@ class Chapter(Base):
     text: Mapped[str] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(64))
     analyzed_hash: Mapped[str | None] = mapped_column(String(64), default=None)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     story: Mapped[Story] = relationship(back_populates="chapters")
     facts: Mapped[list[Fact]] = relationship(back_populates="chapter")
