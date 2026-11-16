@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from qifrey.api.schemas import (
+    AnalysisStatusOut,
     ChapterBrief,
     ChapterOut,
+    CharacterBriefOut,
+    CharacterDetailOut,
     MessageOut,
     StoryCreate,
     StoryDetail,
     StoryOut,
 )
 from qifrey.config import get_settings
-from qifrey.db.models import Chapter, Story
+from qifrey.db.models import Chapter, Fact, Story
 from qifrey.db.session import get_db
+from qifrey.graph.store import get_character_with_facts, list_characters
 from qifrey.ingestion.txt_parser import decode_upload, parse_chapters
+from qifrey.pipeline.runner import analyze_story, get_story_analysis_status
 
 router = APIRouter(prefix="/api")
 
@@ -137,3 +142,64 @@ def get_chapter(chapter_id: int, db: Session = Depends(get_db)) -> Chapter:
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found.")
     return chapter
+
+
+@router.post("/stories/{story_id}/analyze", response_model=MessageOut)
+def trigger_analyze_story(
+    story_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> MessageOut:
+    story = db.query(Story).filter(Story.id == story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found.")
+    background_tasks.add_task(analyze_story, story_id)
+    return MessageOut(detail=f"Analysis scheduled for story {story_id}.")
+
+
+@router.get("/stories/{story_id}/analysis-status", response_model=AnalysisStatusOut)
+def get_analysis_status(
+    story_id: int,
+    db: Session = Depends(get_db),
+) -> AnalysisStatusOut:
+    story = db.query(Story).filter(Story.id == story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found.")
+    status_dict = get_story_analysis_status(story_id, db)
+    return AnalysisStatusOut(**status_dict)
+
+
+@router.get("/stories/{story_id}/characters", response_model=list[CharacterBriefOut])
+def get_story_characters(
+    story_id: int,
+    db: Session = Depends(get_db),
+) -> list[CharacterBriefOut]:
+    story = db.query(Story).filter(Story.id == story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found.")
+    characters = list_characters(db, story_id)
+    results: list[CharacterBriefOut] = []
+    for c in characters:
+        fact_count = db.query(Fact).filter(Fact.character_id == c.id).count()
+        results.append(
+            CharacterBriefOut(
+                id=c.id,
+                story_id=c.story_id,
+                canonical_name=c.canonical_name,
+                description=c.description,
+                aliases=[a.name for a in c.aliases],
+                fact_count=fact_count,
+            )
+        )
+    return results
+
+
+@router.get("/characters/{character_id}", response_model=CharacterDetailOut)
+def get_character_detail(
+    character_id: int,
+    db: Session = Depends(get_db),
+) -> CharacterDetailOut:
+    data = get_character_with_facts(db, character_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Character not found.")
+    return CharacterDetailOut(**data)

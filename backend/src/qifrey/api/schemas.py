@@ -57,3 +57,52 @@ class ChapterBrief(BaseModel):
 
 class MessageOut(BaseModel):
     detail: str
+
+
+class FactDetailOut(BaseModel):
+    id: int
+    attribute: str
+    value: str
+    chapter_id: int
+    quote: str | None = None
+    confidence: float = 1.0
+
+
+class RelationshipDetailOut(BaseModel):
+    id: int
+    type: str
+    source_character_id: int
+    target_character_id: int
+    chapter_id: int
+    quote: str | None = None
+
+
+class CharacterBriefOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    story_id: int
+    canonical_name: str
+    description: str | None = None
+    aliases: list[str] = []
+    fact_count: int = 0
+
+
+class CharacterDetailOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    story_id: int
+    canonical_name: str
+    description: str | None = None
+    aliases: list[str] = []
+    facts: list[FactDetailOut] = []
+    relationships: list[RelationshipDetailOut] = []
+
+
+class AnalysisStatusOut(BaseModel):
+    story_id: int
+    status: str
+    current_chapter: int
+    total_chapters: int
+    error: str | None = None
