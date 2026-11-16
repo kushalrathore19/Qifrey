@@ -176,7 +176,9 @@ class LLMCall(Base):
     __tablename__ = "llm_calls"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    story_id: Mapped[int] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"))
+    story_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stories.id", ondelete="CASCADE"), nullable=True, default=None
+    )
     purpose: Mapped[str] = mapped_column(String(100))
     model: Mapped[str] = mapped_column(String(100))
     prompt_hash: Mapped[str] = mapped_column(String(64))
@@ -185,4 +187,4 @@ class LLMCall(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
-    story: Mapped[Story] = relationship(back_populates="llm_calls")
+    story: Mapped[Story | None] = relationship(back_populates="llm_calls")

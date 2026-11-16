@@ -1,0 +1,284 @@
+"""LLM client interface, Anthropic implementation, and test double."""
+
+from __future__ import annotations
+
+import abc
+import hashlib
+import json
+import logging
+import re
+import time
+from typing import Any, TypeVar
+
+from pydantic import BaseModel, ValidationError
+
+from qifrey.config import get_settings
+from qifrey.db.models import LLMCall
+from qifrey.db.session import get_session_factory
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T", bound=BaseModel)
+
+
+def _compute_prompt_hash(system: str, user: str) -> str:
+    combined = f"SYSTEM:{system}\nUSER:{user}"
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+
+def _extract_json_text(raw: str) -> str:
+    """Extract JSON string from raw model text, stripping markdown code blocks if present."""
+    text = raw.strip()
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if match:
+        return match.group(1).strip()
+    return text
+
+
+def _record_llm_call(
+    *,
+    story_id: int | None,
+    purpose: str,
+    model: str,
+    prompt_hash: str,
+    input_tokens: int,
+    output_tokens: int,
+    latency_ms: int,
+) -> None:
+    """Log an LLM call record into the database."""
+    try:
+        factory = get_session_factory()
+        with factory() as db:
+            call = LLMCall(
+                story_id=story_id,
+                purpose=purpose,
+                model=model,
+                prompt_hash=prompt_hash,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=latency_ms,
+            )
+            db.add(call)
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to record LLMCall to database: %s", exc)
+
+
+class LLMClient(abc.ABC):
+    """Abstract interface for LLM completions."""
+
+    @abc.abstractmethod
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        schema: type[T],
+        *,
+        story_id: int | None = None,
+        purpose: str = "extraction",
+    ) -> T:
+        """Prompt the LLM and return a validated Pydantic model instance."""
+
+
+class AnthropicClient(LLMClient):
+    """Anthropic Claude implementation with retry, JSON validation, and repair."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        max_retries: int = 3,
+    ) -> None:
+        import anthropic
+
+        settings = get_settings()
+        self.api_key = api_key or settings.anthropic_api_key
+        self.model = model or settings.llm_model
+        self.max_retries = max_retries
+        self.client = anthropic.Anthropic(api_key=self.api_key)
+
+    def _call_raw(self, system: str, user: str) -> tuple[str, int, int, int]:
+        """Perform raw API call with retries and return tokens and latency."""
+        last_err: Exception | None = None
+
+        for attempt in range(self.max_retries):
+            start = time.perf_counter()
+            try:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                    temperature=0.0,
+                )
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                text = ""
+                for block in response.content:
+                    if getattr(block, "type", "") == "text":
+                        text += block.text
+
+                in_tokens = response.usage.input_tokens
+                out_tokens = response.usage.output_tokens
+                return text, in_tokens, out_tokens, latency_ms
+            except Exception as err:
+                last_err = err
+                wait_time = 2**attempt
+                logger.warning(
+                    "Anthropic API call attempt %d failed: %s. Retrying in %ds...",
+                    attempt + 1,
+                    err,
+                    wait_time,
+                )
+                time.sleep(wait_time)
+
+        raise RuntimeError(
+            f"Anthropic API failed after {self.max_retries} attempts: {last_err}"
+        ) from last_err
+
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        schema: type[T],
+        *,
+        story_id: int | None = None,
+        purpose: str = "extraction",
+    ) -> T:
+        schema_json = json.dumps(schema.model_json_schema(), indent=2)
+        system_with_schema = (
+            f"{system}\n\n"
+            f"You MUST output valid JSON only, conforming exactly to this JSON Schema:\n"
+            f"{schema_json}\n"
+            f"Do not include any commentary or text outside the JSON object."
+        )
+
+        prompt_hash = _compute_prompt_hash(system_with_schema, user)
+        raw_text, in_tokens, out_tokens, latency_ms = self._call_raw(system_with_schema, user)
+
+        _record_llm_call(
+            story_id=story_id,
+            purpose=purpose,
+            model=self.model,
+            prompt_hash=prompt_hash,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            latency_ms=latency_ms,
+        )
+
+        json_candidate = _extract_json_text(raw_text)
+        try:
+            parsed = json.loads(json_candidate)
+            return schema.model_validate(parsed)
+        except (json.JSONDecodeError, ValidationError) as parse_error:
+            logger.warning(
+                "JSON validation failed (%s). Attempting one repair request...",
+                parse_error,
+            )
+            # One repair attempt
+            repair_user = (
+                f"Your previous response could not be parsed as valid JSON matching the schema.\n"
+                f"Error: {parse_error}\n\n"
+                f"Previous output:\n{raw_text}\n\n"
+                f"Please fix and output ONLY the corrected JSON object conforming to the schema."
+            )
+            repair_hash = _compute_prompt_hash(system_with_schema, repair_user)
+            repaired_text, r_in, r_out, r_latency = self._call_raw(system_with_schema, repair_user)
+            _record_llm_call(
+                story_id=story_id,
+                purpose=f"{purpose}_repair",
+                model=self.model,
+                prompt_hash=repair_hash,
+                input_tokens=r_in,
+                output_tokens=r_out,
+                latency_ms=r_latency,
+            )
+            repaired_json = _extract_json_text(repaired_text)
+            parsed_repair = json.loads(repaired_json)
+            return schema.model_validate(parsed_repair)
+
+
+class FakeLLMClient(LLMClient):
+    """Test double returning canned responses or schema defaults."""
+
+    def __init__(self, responses: list[Any] | None = None) -> None:
+        self.responses: list[Any] = responses or []
+        self.history: list[dict[str, Any]] = []
+
+    def set_next_response(self, response: Any) -> None:
+        self.responses.append(response)
+
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        schema: type[T],
+        *,
+        story_id: int | None = None,
+        purpose: str = "extraction",
+    ) -> T:
+        prompt_hash = _compute_prompt_hash(system, user)
+        self.history.append(
+            {
+                "system": system,
+                "user": user,
+                "schema": schema,
+                "story_id": story_id,
+                "purpose": purpose,
+                "prompt_hash": prompt_hash,
+            }
+        )
+
+        _record_llm_call(
+            story_id=story_id,
+            purpose=purpose,
+            model="fake-llm",
+            prompt_hash=prompt_hash,
+            input_tokens=len(user.split()),
+            output_tokens=50,
+            latency_ms=5,
+        )
+
+        if self.responses:
+            item = self.responses.pop(0)
+            if isinstance(item, schema):
+                return item
+            if isinstance(item, dict):
+                return schema.model_validate(item)
+            if isinstance(item, str):
+                parsed = json.loads(_extract_json_text(item))
+                return schema.model_validate(parsed)
+            if isinstance(item, Exception):
+                raise item
+
+        # Default fallback: construct empty instance
+        try:
+            return schema()
+        except ValidationError:
+            # Construct dummy dict if schema has required fields
+            return schema.model_validate({})
+
+
+_active_llm_client: LLMClient | None = None
+
+
+def get_llm_client() -> LLMClient:
+    """Return configured LLM client singleton."""
+    global _active_llm_client
+    if _active_llm_client is not None:
+        return _active_llm_client
+
+    settings = get_settings()
+    if settings.llm_provider.lower() == "anthropic":
+        _active_llm_client = AnthropicClient(
+            api_key=settings.anthropic_api_key,
+            model=settings.llm_model,
+        )
+    else:
+        _active_llm_client = FakeLLMClient()
+    return _active_llm_client
+
+
+def set_llm_client(client: LLMClient | None) -> None:
+    """Override active client (useful for tests)."""
+    global _active_llm_client
+    _active_llm_client = client
