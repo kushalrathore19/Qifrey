@@ -1,0 +1,73 @@
+{
+  "title": "The Warden of Silver",
+  "chapters": [
+    {
+      "index": 1,
+      "title": "Chapter 1: The Atelier",
+      "text": "Master Qifrey, a gentle teacher known throughout the Great Hall as the Warden of Silver, adjusted his spectacles. His silver eyes gleamed softly in the candlelight of the Atelier as he instructed his apprentices.",
+      "characters": [
+        {
+          "canonical_name": "Qifrey",
+          "aliases": ["Master Qifrey", "The Warden of Silver"]
+        }
+      ],
+      "locations": [
+        {
+          "name": "The Great Hall"
+        },
+        {
+          "name": "The Atelier"
+        }
+      ],
+      "facts": [
+        {
+          "character": "Qifrey",
+          "attribute": "eye_color",
+          "value": "silver",
+          "quote": "silver eyes"
+        },
+        {
+          "character": "Qifrey",
+          "attribute": "occupation",
+          "value": "teacher",
+          "quote": "gentle teacher"
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "title": "Chapter 2: The Dark Chamber",
+      "text": "Late at night within the Atelier, Master Qifrey stared into the dark water basin. His dark obsidian eyes reflected the shadows as he whispered an incantation.",
+      "characters": [
+        {
+          "canonical_name": "Qifrey",
+          "aliases": ["Master Qifrey"]
+        }
+      ],
+      "locations": [
+        {
+          "name": "The Atelier"
+        }
+      ],
+      "facts": [
+        {
+          "character": "Qifrey",
+          "attribute": "eye_color",
+          "value": "dark obsidian",
+          "quote": "dark obsidian eyes"
+        }
+      ]
+    }
+  ],
+  "contradictions": [
+    {
+      "character": "Qifrey",
+      "attribute": "eye_color",
+      "chapter_a": 1,
+      "chapter_b": 2,
+      "value_a": "silver",
+      "value_b": "dark obsidian",
+      "description": "Eye color changed from silver to dark obsidian without explanation."
+    }
+  ]
+}

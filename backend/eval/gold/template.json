@@ -1,0 +1,40 @@
+{
+  "title": "Story Title",
+  "chapters": [
+    {
+      "index": 1,
+      "title": "Chapter 1: The Beginning",
+      "text": "Full verbatim chapter text goes here.",
+      "characters": [
+        {
+          "canonical_name": "Canonical Character Name",
+          "aliases": ["Alias One", "Alias Two"]
+        }
+      ],
+      "locations": [
+        {
+          "name": "Location Name"
+        }
+      ],
+      "facts": [
+        {
+          "character": "Canonical Character Name",
+          "attribute": "eye_color",
+          "value": "green",
+          "quote": "bright green eyes"
+        }
+      ]
+    }
+  ],
+  "contradictions": [
+    {
+      "character": "Canonical Character Name",
+      "attribute": "eye_color",
+      "chapter_a": 1,
+      "chapter_b": 2,
+      "value_a": "green",
+      "value_b": "blue",
+      "description": "Eye color changed from green to blue without explanation."
+    }
+  ]
+}

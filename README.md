@@ -40,6 +40,25 @@ cd frontend
 npm test
 ```
 
+### How to Evaluate
+
+Qifrey includes an evaluation harness in `backend/eval/` to evaluate extraction accuracy (precision, recall, F1) across characters, aliases, locations, and facts, benchmark against naive baselines, and test contradiction detection on planted errors:
+
+```bash
+cd backend
+
+# Run evaluation on gold standard stories (outputs reports to eval/reports/)
+python -m eval.run_eval --gold eval/gold --out eval/reports
+
+# Force offline/fake LLM evaluation (even if an API key is set)
+python -m eval.run_eval --gold eval/gold --out eval/reports --fake
+
+# Inject contradictions and legitimate changes into a story to test detector robustness
+python -m eval.inject_contradictions --input eval/gold/example_story.json --out eval/gold/modified.json --key eval/gold/answer_key.json --n 1
+```
+
+Reports are written to `eval/reports/<timestamp>.md` and `.csv`, detailing precision/recall/F1, baseline comparisons, token counts, and estimated LLM costs.
+
 ## Project Structure
 
 ```

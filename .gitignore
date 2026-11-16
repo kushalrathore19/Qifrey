@@ -44,3 +44,7 @@ coverage.xml
 
 # Ruff
 .ruff_cache/
+
+# Eval reports
+backend/eval/reports/*.md
+backend/eval/reports/*.csv
