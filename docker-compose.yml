@@ -1,0 +1,26 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - QIFREY_DB_PATH=/data/qifrey.db
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - QIFREY_LLM_PROVIDER=${QIFREY_LLM_PROVIDER:-fake}
+      - QIFREY_LLM_MODEL=${QIFREY_LLM_MODEL:-claude-3-5-sonnet-20241022}
+    volumes:
+      - qifrey-data:/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  qifrey-data:
