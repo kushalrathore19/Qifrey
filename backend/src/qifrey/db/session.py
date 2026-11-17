@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
@@ -10,6 +11,8 @@ from sqlalchemy.pool import StaticPool
 
 from qifrey.config import get_settings
 from qifrey.db.models import Base
+
+logger = logging.getLogger(__name__)
 
 _engine = None
 _SessionLocal = None
@@ -72,6 +75,54 @@ def _migrate_columns(engine) -> None:
                     conn.commit()
             except Exception:
                 pass
+
+        # Make facts.chapter_id nullable if it was created with NOT NULL constraint
+        try:
+            table_info = conn.execute(text("PRAGMA table_info(facts)")).fetchall()
+            chapter_col = next((row for row in table_info if row[1] == "chapter_id"), None)
+            if chapter_col and chapter_col[3] == 1:
+                conn.execute(text("PRAGMA foreign_keys=OFF;"))
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS facts_new (
+                            id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                            story_id INTEGER NOT NULL,
+                            character_id INTEGER NOT NULL,
+                            attribute VARCHAR(200) NOT NULL,
+                            value TEXT NOT NULL,
+                            chapter_id INTEGER,
+                            quote TEXT,
+                            confidence FLOAT NOT NULL,
+                            source VARCHAR(20) DEFAULT 'ai',
+                            locked BOOLEAN DEFAULT 0,
+                            FOREIGN KEY(story_id) REFERENCES stories (id) ON DELETE CASCADE,
+                            FOREIGN KEY(character_id) REFERENCES characters (id) ON DELETE CASCADE,
+                            FOREIGN KEY(chapter_id) REFERENCES chapters (id) ON DELETE CASCADE
+                        );
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO facts_new (
+                            id, story_id, character_id, attribute, value,
+                            chapter_id, quote, confidence, source, locked
+                        )
+                        SELECT id, story_id, character_id, attribute, value,
+                               chapter_id, quote, confidence,
+                               COALESCE(source, 'ai'), COALESCE(locked, 0)
+                        FROM facts;
+                        """
+                    )
+                )
+                conn.execute(text("DROP TABLE facts;"))
+                conn.execute(text("ALTER TABLE facts_new RENAME TO facts;"))
+                conn.execute(text("PRAGMA foreign_keys=ON;"))
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("facts table nullable migration skipped: %s", exc)
 
 
 def init_db() -> None:
