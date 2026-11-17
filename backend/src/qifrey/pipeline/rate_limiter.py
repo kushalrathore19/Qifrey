@@ -18,6 +18,34 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+
+class DailyBudgetExceededError(Exception):
+    """Raised when the daily LLM call budget has been exhausted."""
+
+    status_code = 429
+
+
+def check_daily_budget_available() -> bool:
+    """Return True if daily LLM call count is under QIFREY_LLM_DAILY_BUDGET."""
+    settings = get_settings()
+    if settings.llm_daily_budget <= 0:
+        return True
+    try:
+        from datetime import UTC, datetime, timedelta
+
+        from qifrey.db.models import LLMCall
+        from qifrey.db.session import get_session_factory
+
+        factory = get_session_factory()
+        cutoff = datetime.now(UTC) - timedelta(hours=24)
+        with factory() as db:
+            count = db.query(LLMCall).filter(LLMCall.created_at >= cutoff).count()
+            return count < settings.llm_daily_budget
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not check daily LLM budget: %s", exc)
+        return True
+
+
 # Status callback: (story_id, status_or_waiting) -> None
 _STATUS_LISTENERS: list[Callable[[int | None, str | bool | None], None]] = []
 
@@ -56,6 +84,7 @@ def is_rate_limit_error(exc: Exception) -> bool:
             or "rate limit" in err_str
             or "quota exceeded" in err_str
             or "too many requests" in err_str
+            or "daily budget" in err_str
         ):
             return True
     return False
@@ -106,7 +135,15 @@ class RateLimiter:
             self.max_rpm = max_rpm
 
     def acquire(self, story_id: int | None = None) -> None:
-        """Throttle requests to respect max_rpm sliding window."""
+        """Throttle requests to respect max_rpm sliding window and daily budget."""
+        if not check_daily_budget_available():
+            settings = get_settings()
+            logger.warning("Daily LLM call budget (%d) reached.", settings.llm_daily_budget)
+            notify_rate_limit_status(story_id, "Paused: rate limit")
+            raise DailyBudgetExceededError(
+                f"Daily LLM budget reached ({settings.llm_daily_budget} calls/24h). Paused."
+            )
+
         if self.max_rpm <= 0:
             return
 

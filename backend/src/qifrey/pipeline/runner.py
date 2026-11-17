@@ -20,7 +20,11 @@ from qifrey.graph.store import (
 )
 from qifrey.insights.contradictions import detect_contradictions
 from qifrey.insights.summarizer import generate_summaries
-from qifrey.pipeline.context_builder import build_memory_block, chunk_chapter_text
+from qifrey.pipeline.context_builder import (
+    build_memory_block,
+    chunk_chapter_text,
+    find_recently_mentioned_characters,
+)
 from qifrey.pipeline.llm_client import LLMClient, get_llm_client
 from qifrey.pipeline.prompts import load_prompt
 from qifrey.pipeline.rate_limiter import register_rate_limit_listener
@@ -143,12 +147,15 @@ def analyze_chapter(
             purpose=f"extraction_ch{chapter.index}_p{chunk_idx}",
         )
 
+        recent_chars = find_recently_mentioned_characters(chunk)
+
         # Validate extraction against this chunk's text
         val_result = validate_extraction(
             extraction,
             chunk,
             confidence_threshold=confidence_threshold,
             ignored_names=ignored_names,
+            recent_characters=recent_chars,
         )
 
         # 1. Store characters and aliases
@@ -275,3 +282,51 @@ def analyze_story(story_id: int, *, llm_client: LLMClient | None = None) -> None
             _ANALYSIS_PROGRESS[story_id]["status"] = "failed"
             _ANALYSIS_PROGRESS[story_id]["error"] = str(err)
             raise
+
+
+def analyze_single_chapter(
+    chapter_id: int,
+    db: Session,
+    *,
+    llm_client: LLMClient | None = None,
+) -> dict[str, Any]:
+    """Analyze a single chapter.
+
+    Extracts, validates, resolves, and re-runs contradiction detection.
+    """
+    chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+    if not chapter:
+        raise ValueError(f"Chapter {chapter_id} not found")
+
+    story_id = chapter.story_id
+
+    if chapter.exclude_from_analysis:
+        logger.info("Chapter %d is marked exclude_from_analysis, skipping.", chapter.index)
+        return {"status": "skipped", "reason": "excluded"}
+
+    # Incremental check: if content hash matches analyzed hash, skip
+    if chapter.analyzed_hash and chapter.analyzed_hash == chapter.content_hash:
+        logger.info("Chapter %d is up to date (hash matches), skipping.", chapter.index)
+        return {"status": "skipped", "reason": "unchanged"}
+
+    total_chapters = db.query(Chapter).filter(Chapter.story_id == story_id).count()
+    _ANALYSIS_PROGRESS[story_id] = {
+        "story_id": story_id,
+        "status": "running",
+        "current_chapter": chapter.index,
+        "total_chapters": total_chapters,
+        "error": None,
+    }
+
+    try:
+        did_analyze = analyze_chapter(story_id, chapter, db, llm_client=llm_client)
+        if did_analyze:
+            detect_contradictions(story_id, db, chapter_id=chapter.id, llm_client=llm_client)
+
+        _ANALYSIS_PROGRESS[story_id]["status"] = "completed"
+        return {"status": "completed", "chapter_id": chapter_id}
+    except Exception as exc:
+        logger.exception("Error during single-chapter analysis of chapter %d: %s", chapter_id, exc)
+        _ANALYSIS_PROGRESS[story_id]["status"] = "failed"
+        _ANALYSIS_PROGRESS[story_id]["error"] = str(exc)
+        raise

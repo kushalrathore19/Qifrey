@@ -61,6 +61,7 @@ QIFREY_LLM_PROVIDER=gemini        # 'gemini' | 'anthropic' | 'fake'
 QIFREY_LLM_MODEL=gemini-2.5-flash # or 'claude-sonnet-4-20250514'
 QIFREY_LLM_FALLBACK_MODEL=gemini-1.5-flash # optional fallback if primary returns 503
 QIFREY_LLM_MAX_RPM=10             # Rate limit throttle: max requests per minute
+QIFREY_LLM_DAILY_BUDGET=1000      # Max LLM calls allowed per 24 hours
 
 # Provider API Keys (set the key for your provider)
 GEMINI_API_KEY=your_gemini_api_key_here

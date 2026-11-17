@@ -241,6 +241,11 @@ class AnalysisStatusOut(BaseModel):
     error: str | None = None
 
 
+class GrammarStatusOut(BaseModel):
+    available: bool
+    message: str | None = None
+
+
 class IssueOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -41,6 +41,7 @@ from qifrey.api.schemas import (
     FactUpdate,
     GrammarCheckRequest,
     GrammarIssueOut,
+    GrammarStatusOut,
     IssueOut,
     IssueStatusUpdate,
     MessageOut,
@@ -71,7 +72,11 @@ from qifrey.graph.store import (
     merge_characters,
 )
 from qifrey.ingestion.txt_parser import decode_upload, parse_chapters
-from qifrey.pipeline.runner import analyze_story, get_story_analysis_status
+from qifrey.pipeline.runner import (
+    analyze_single_chapter,
+    analyze_story,
+    get_story_analysis_status,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -79,6 +84,14 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/grammar/status", response_model=GrammarStatusOut)
+def grammar_status() -> GrammarStatusOut:
+    """Return whether grammar checker (LanguageTool/Java) is available."""
+    from qifrey.grammar.checker import get_grammar_checker_status
+
+    return GrammarStatusOut(**get_grammar_checker_status())
 
 
 @router.post("/stories/upload", response_model=StoryDetail, status_code=201)
@@ -295,6 +308,27 @@ def check_chapter_grammar_endpoint(
         )
         for issue in issues
     ]
+
+
+def _run_single_chapter_analysis_task(chapter_id: int) -> None:
+    from qifrey.db.session import get_session_factory
+
+    factory = get_session_factory()
+    with factory() as db:
+        analyze_single_chapter(chapter_id, db)
+
+
+@router.post("/chapters/{chapter_id}/analyze", response_model=MessageOut)
+def trigger_analyze_chapter(
+    chapter_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> MessageOut:
+    chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapter not found.")
+    background_tasks.add_task(_run_single_chapter_analysis_task, chapter_id)
+    return MessageOut(detail=f"Analysis scheduled for chapter {chapter_id}.")
 
 
 @router.post("/stories/{story_id}/analyze", response_model=MessageOut)

@@ -33,6 +33,10 @@ class Settings(BaseSettings):
         default=10,
         validation_alias=AliasChoices("QIFREY_LLM_MAX_RPM", "LLM_MAX_RPM"),
     )
+    llm_daily_budget: int = Field(
+        default=1000,
+        validation_alias=AliasChoices("QIFREY_LLM_DAILY_BUDGET", "LLM_DAILY_BUDGET"),
+    )
     max_upload_bytes: int = 5 * 1024 * 1024
 
     model_config = {

@@ -41,6 +41,7 @@ SKIP_IN_DIALOGUE_RULES: frozenset[str] = frozenset(
 
 _tool_instance: Any = None
 _tool_failed: bool = False
+_tool_failure_reason: str | None = None
 
 
 @dataclass
@@ -77,7 +78,7 @@ def _is_span_in_dialogue(start: int, end: int, quote_spans: list[tuple[int, int]
 
 def get_language_tool(language: str = "en-US") -> Any | None:
     """Return cached LanguageTool instance or None if Java/LanguageTool is unavailable."""
-    global _tool_instance, _tool_failed
+    global _tool_instance, _tool_failed, _tool_failure_reason
     if _tool_failed:
         return None
     if _tool_instance is not None:
@@ -90,11 +91,23 @@ def get_language_tool(language: str = "en-US") -> Any | None:
         return _tool_instance
     except Exception as exc:  # noqa: BLE001
         _tool_failed = True
+        _tool_failure_reason = "grammar checker unavailable (Java not found)"
         logger.warning(
             "LanguageTool / Java runtime is unavailable (%s). Grammar checks will be skipped.",
             exc,
         )
         return None
+
+
+def get_grammar_checker_status() -> dict[str, Any]:
+    """Return status of the grammar checker (available or reason for unavailability)."""
+    tool = get_language_tool()
+    if tool is not None:
+        return {"available": True, "message": None}
+    return {
+        "available": False,
+        "message": _tool_failure_reason or "grammar checker unavailable (Java not found)",
+    }
 
 
 def check_grammar(
