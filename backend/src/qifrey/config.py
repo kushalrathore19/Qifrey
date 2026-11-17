@@ -4,26 +4,37 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     """Qifrey application settings.
 
-    Most fields use the QIFREY_ env prefix.
-    ``anthropic_api_key`` reads ANTHROPIC_API_KEY directly (no prefix).
+    Supports QIFREY_ env prefix, plus direct provider keys.
     """
 
     db_path: str = "qifrey.db"
-    llm_provider: str = "anthropic"
+    llm_provider: str = "anthropic"  # anthropic | gemini | fake
     llm_model: str = "claude-sonnet-4-20250514"
-    anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    anthropic_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("ANTHROPIC_API_KEY", "QIFREY_ANTHROPIC_API_KEY"),
+    )
+    gemini_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("GEMINI_API_KEY", "QIFREY_GEMINI_API_KEY"),
+    )
+    llm_max_rpm: int = Field(
+        default=10,
+        validation_alias=AliasChoices("QIFREY_LLM_MAX_RPM", "LLM_MAX_RPM"),
+    )
     max_upload_bytes: int = 5 * 1024 * 1024
 
     model_config = {
         "env_prefix": "QIFREY_",
         "populate_by_name": True,
+        "extra": "ignore",
     }
 
 

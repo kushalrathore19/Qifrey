@@ -15,6 +15,7 @@ from pydantic import BaseModel, ValidationError
 from qifrey.config import get_settings
 from qifrey.db.models import LLMCall
 from qifrey.db.session import get_session_factory
+from qifrey.pipeline.rate_limiter import get_rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -97,43 +98,42 @@ class AnthropicClient(LLMClient):
         self.max_retries = max_retries
         self.client = anthropic.Anthropic(api_key=self.api_key)
 
-    def _call_raw(self, system: str, user: str) -> tuple[str, int, int, int]:
-        """Perform raw API call with retries and return tokens and latency."""
-        last_err: Exception | None = None
+    def _call_raw(
+        self,
+        system: str,
+        user: str,
+        *,
+        story_id: int | None = None,
+        purpose: str = "",
+    ) -> tuple[str, int, int, int]:
+        """Perform raw API call with shared rate limiter and retries."""
 
-        for attempt in range(self.max_retries):
+        def _do_call() -> tuple[str, int, int, int]:
             start = time.perf_counter()
-            try:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=4096,
-                    system=system,
-                    messages=[{"role": "user", "content": user}],
-                    temperature=0.0,
-                )
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                text = ""
-                for block in response.content:
-                    if getattr(block, "type", "") == "text":
-                        text += block.text
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=4096,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                temperature=0.0,
+            )
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            text = ""
+            for block in response.content:
+                if getattr(block, "type", "") == "text":
+                    text += block.text
 
-                in_tokens = response.usage.input_tokens
-                out_tokens = response.usage.output_tokens
-                return text, in_tokens, out_tokens, latency_ms
-            except Exception as err:
-                last_err = err
-                wait_time = 2**attempt
-                logger.warning(
-                    "Anthropic API call attempt %d failed: %s. Retrying in %ds...",
-                    attempt + 1,
-                    err,
-                    wait_time,
-                )
-                time.sleep(wait_time)
+            in_tokens = response.usage.input_tokens
+            out_tokens = response.usage.output_tokens
+            return text, in_tokens, out_tokens, latency_ms
 
-        raise RuntimeError(
-            f"Anthropic API failed after {self.max_retries} attempts: {last_err}"
-        ) from last_err
+        rate_limiter = get_rate_limiter()
+        return rate_limiter.execute_with_retry(
+            _do_call,
+            story_id=story_id,
+            purpose=purpose,
+            max_retries=self.max_retries,
+        )
 
     def complete_json(
         self,
@@ -153,7 +153,12 @@ class AnthropicClient(LLMClient):
         )
 
         prompt_hash = _compute_prompt_hash(system_with_schema, user)
-        raw_text, in_tokens, out_tokens, latency_ms = self._call_raw(system_with_schema, user)
+        raw_text, in_tokens, out_tokens, latency_ms = self._call_raw(
+            system_with_schema,
+            user,
+            story_id=story_id,
+            purpose=purpose,
+        )
 
         _record_llm_call(
             story_id=story_id,
@@ -182,7 +187,146 @@ class AnthropicClient(LLMClient):
                 f"Please fix and output ONLY the corrected JSON object conforming to the schema."
             )
             repair_hash = _compute_prompt_hash(system_with_schema, repair_user)
-            repaired_text, r_in, r_out, r_latency = self._call_raw(system_with_schema, repair_user)
+            repaired_text, r_in, r_out, r_latency = self._call_raw(
+                system_with_schema,
+                repair_user,
+                story_id=story_id,
+                purpose=f"{purpose}_repair",
+            )
+            _record_llm_call(
+                story_id=story_id,
+                purpose=f"{purpose}_repair",
+                model=self.model,
+                prompt_hash=repair_hash,
+                input_tokens=r_in,
+                output_tokens=r_out,
+                latency_ms=r_latency,
+            )
+            repaired_json = _extract_json_text(repaired_text)
+            parsed_repair = json.loads(repaired_json)
+            return schema.model_validate(parsed_repair)
+
+
+class GeminiClient(LLMClient):
+    """Google Gemini implementation using official google-genai SDK."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        max_retries: int = 5,
+    ) -> None:
+        from google import genai
+
+        settings = get_settings()
+        self.api_key = api_key or settings.gemini_api_key or "placeholder-api-key"
+        # Default model for Gemini
+        default_model = (
+            settings.llm_model
+            if settings.llm_model and not settings.llm_model.startswith("claude-")
+            else "gemini-2.5-flash"
+        )
+        self.model = model or default_model
+        self.max_retries = max_retries
+        self.client = genai.Client(api_key=self.api_key)
+
+    def _call_raw(
+        self,
+        system: str,
+        user: str,
+        *,
+        story_id: int | None = None,
+        purpose: str = "",
+    ) -> tuple[str, int, int, int]:
+        """Perform raw Gemini API call wrapped in rate limiter and retry."""
+        from google.genai import types
+
+        def _do_call() -> tuple[str, int, int, int]:
+            start = time.perf_counter()
+            config = types.GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+                temperature=0.0,
+            )
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=user,
+                config=config,
+            )
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            text = response.text or ""
+            in_tokens = 0
+            out_tokens = 0
+            if response.usage_metadata:
+                in_tokens = response.usage_metadata.prompt_token_count or 0
+                out_tokens = response.usage_metadata.candidates_token_count or 0
+            return text, in_tokens, out_tokens, latency_ms
+
+        rate_limiter = get_rate_limiter()
+        return rate_limiter.execute_with_retry(
+            _do_call,
+            story_id=story_id,
+            purpose=purpose,
+            max_retries=self.max_retries,
+        )
+
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        schema: type[T],
+        *,
+        story_id: int | None = None,
+        purpose: str = "extraction",
+    ) -> T:
+        schema_json = json.dumps(schema.model_json_schema(), indent=2)
+        system_with_schema = (
+            f"{system}\n\n"
+            f"You MUST output valid JSON only, conforming exactly to this JSON Schema:\n"
+            f"{schema_json}\n"
+            f"Do not include any commentary or text outside the JSON object."
+        )
+
+        prompt_hash = _compute_prompt_hash(system_with_schema, user)
+        raw_text, in_tokens, out_tokens, latency_ms = self._call_raw(
+            system_with_schema,
+            user,
+            story_id=story_id,
+            purpose=purpose,
+        )
+
+        _record_llm_call(
+            story_id=story_id,
+            purpose=purpose,
+            model=self.model,
+            prompt_hash=prompt_hash,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            latency_ms=latency_ms,
+        )
+
+        json_candidate = _extract_json_text(raw_text)
+        try:
+            parsed = json.loads(json_candidate)
+            return schema.model_validate(parsed)
+        except (json.JSONDecodeError, ValidationError) as parse_error:
+            logger.warning(
+                "JSON validation failed (%s). Attempting one repair request with Gemini...",
+                parse_error,
+            )
+            repair_user = (
+                f"Your previous response could not be parsed as valid JSON matching the schema.\n"
+                f"Error: {parse_error}\n\n"
+                f"Previous output:\n{raw_text}\n\n"
+                f"Please fix and output ONLY the corrected JSON object conforming to the schema."
+            )
+            repair_hash = _compute_prompt_hash(system_with_schema, repair_user)
+            repaired_text, r_in, r_out, r_latency = self._call_raw(
+                system_with_schema,
+                repair_user,
+                story_id=story_id,
+                purpose=f"{purpose}_repair",
+            )
             _record_llm_call(
                 story_id=story_id,
                 purpose=f"{purpose}_repair",
@@ -283,7 +427,18 @@ def get_llm_client() -> LLMClient:
         return _active_llm_client
 
     settings = get_settings()
-    if settings.llm_provider.lower() == "anthropic":
+    provider = settings.llm_provider.strip().lower()
+    if provider == "gemini":
+        default_model = (
+            settings.llm_model
+            if settings.llm_model and not settings.llm_model.startswith("claude-")
+            else "gemini-2.5-flash"
+        )
+        _active_llm_client = GeminiClient(
+            api_key=settings.gemini_api_key,
+            model=default_model,
+        )
+    elif provider == "anthropic":
         _active_llm_client = AnthropicClient(
             api_key=settings.anthropic_api_key,
             model=settings.llm_model,

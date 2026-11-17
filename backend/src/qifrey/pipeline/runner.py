@@ -23,6 +23,7 @@ from qifrey.insights.summarizer import generate_summaries
 from qifrey.pipeline.context_builder import build_memory_block, chunk_chapter_text
 from qifrey.pipeline.llm_client import LLMClient, get_llm_client
 from qifrey.pipeline.prompts import load_prompt
+from qifrey.pipeline.rate_limiter import register_rate_limit_listener
 from qifrey.pipeline.schemas import ExtractionOutput
 from qifrey.pipeline.validator import validate_extraction
 
@@ -33,6 +34,19 @@ logger = logging.getLogger(__name__)
 
 # In-memory progress tracking: story_id -> status dict
 _ANALYSIS_PROGRESS: dict[int, dict[str, Any]] = {}
+
+
+def set_story_rate_limit_status(story_id: int | None, waiting: bool) -> None:
+    """Callback invoked by RateLimiter to update live analysis progress during 429 backoff."""
+    if story_id is not None and story_id in _ANALYSIS_PROGRESS:
+        if waiting:
+            _ANALYSIS_PROGRESS[story_id]["status"] = "waiting on rate limit"
+        elif _ANALYSIS_PROGRESS[story_id]["status"] == "waiting on rate limit":
+            _ANALYSIS_PROGRESS[story_id]["status"] = "running"
+
+
+# Register global rate limit listener
+register_rate_limit_listener(set_story_rate_limit_status)
 
 
 def get_story_analysis_status(story_id: int, db: Session) -> dict[str, Any]:

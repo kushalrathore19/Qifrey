@@ -44,11 +44,14 @@ HONORIFICS: frozenset[str] = frozenset(
 
 # In-memory resolution cache: (story_id, candidate_name_lower) -> character_id
 _RESOLUTION_CACHE: dict[tuple[int, str], int] = {}
+# LLM answer cache: (story_id, name_lower, tuple_of_candidate_ids) -> character_id | None
+_LLM_RESOLUTION_CACHE: dict[tuple[int, str, tuple[int, ...]], int | None] = {}
 
 
 def clear_resolution_cache() -> None:
-    """Clear in-memory resolution cache (useful for tests)."""
+    """Clear in-memory resolution caches (useful for tests)."""
     _RESOLUTION_CACHE.clear()
+    _LLM_RESOLUTION_CACHE.clear()
 
 
 def strip_honorifics(name: str) -> str:
@@ -260,7 +263,18 @@ def _ask_llm_resolution(
     story_id: int,
     llm_client: LLMClient,
 ) -> Character | None:
-    """Prompt the LLM to resolve which candidate character the name refers to."""
+    """Prompt the LLM to resolve which candidate character the name refers to, with caching."""
+    cand_ids = tuple(sorted(c.id for c in candidates))
+    llm_cache_key = (story_id, name.strip().lower(), cand_ids)
+
+    if llm_cache_key in _LLM_RESOLUTION_CACHE:
+        cached_char_id = _LLM_RESOLUTION_CACHE[llm_cache_key]
+        if cached_char_id is None:
+            return None
+        for c in candidates:
+            if c.id == cached_char_id:
+                return c
+
     system = (
         "You are an expert narrative analyst. Determine if a mentioned name refers to an "
         "existing character from the provided candidate list or represents a distinct person."
@@ -277,6 +291,7 @@ def _ask_llm_resolution(
         f"Otherwise set is_same_person=false."
     )
 
+    matching_char: Character | None = None
     try:
         result = llm_client.complete_json(
             system=system,
@@ -288,8 +303,10 @@ def _ask_llm_resolution(
         if result.is_same_person:
             for c in candidates:
                 if c.canonical_name.strip().lower() == result.canonical_name.strip().lower():
-                    return c
+                    matching_char = c
+                    break
     except Exception as exc:  # noqa: BLE001
         logger.warning("LLM alias resolution failed: %s", exc)
 
-    return None
+    _LLM_RESOLUTION_CACHE[llm_cache_key] = matching_char.id if matching_char else None
+    return matching_char

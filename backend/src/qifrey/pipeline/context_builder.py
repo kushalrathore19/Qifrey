@@ -17,7 +17,10 @@ def estimate_tokens(text: str) -> int:
 
 
 def chunk_chapter_text(text: str, max_words: int = 3000) -> list[str]:
-    """Split chapter text into chunks of at most ~max_words along paragraph boundaries."""
+    """Split chapter text into chunks of at most ~max_words along paragraph boundaries.
+
+    Batches small chunks together to minimize LLM extraction calls.
+    """
     words = text.split()
     if len(words) <= max_words:
         return [text]
@@ -39,6 +42,21 @@ def chunk_chapter_text(text: str, max_words: int = 3000) -> list[str]:
 
     if current_chunk:
         chunks.append("\n\n".join(current_chunk).strip())
+
+    # Batch small tail or short scene chunks with the preceding chunk when possible
+    if len(chunks) > 1:
+        merged_chunks: list[str] = []
+        for chk in chunks:
+            if not merged_chunks:
+                merged_chunks.append(chk)
+            else:
+                last_words = len(merged_chunks[-1].split())
+                chk_words = len(chk.split())
+                if chk_words < 800 and (last_words + chk_words <= int(max_words * 1.3)):
+                    merged_chunks[-1] = merged_chunks[-1] + "\n\n" + chk
+                else:
+                    merged_chunks.append(chk)
+        chunks = merged_chunks
 
     return chunks if chunks else [text]
 

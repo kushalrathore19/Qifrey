@@ -57,9 +57,13 @@ Copy `.env.example` in `backend/` or set the following in your environment:
 
 ```bash
 # LLM Provider & Credentials
+QIFREY_LLM_PROVIDER=gemini        # 'gemini' | 'anthropic' | 'fake'
+QIFREY_LLM_MODEL=gemini-2.5-flash # or 'claude-sonnet-4-20250514'
+QIFREY_LLM_MAX_RPM=10             # Rate limit throttle: max requests per minute
+
+# Provider API Keys (set the key for your provider)
+GEMINI_API_KEY=your_gemini_api_key_here
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
-QIFREY_LLM_PROVIDER=anthropic     # 'anthropic' for live analysis; 'fake' for offline dev/tests
-QIFREY_LLM_MODEL=claude-3-5-sonnet-20241022
 
 # Database & Upload Settings
 QIFREY_DB_PATH=qifrey.db          # Path to SQLite file or ':memory:'

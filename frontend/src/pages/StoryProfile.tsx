@@ -18,6 +18,7 @@ import {
   GitMerge,
   X,
   Check,
+  Clock,
 } from "lucide-react";
 import {
   getStory,
@@ -106,7 +107,9 @@ export const StoryProfile: React.FC = () => {
     enabled: !isNaN(storyId),
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status === "running" ? 1500 : false;
+      return status === "running" || status === "waiting on rate limit"
+        ? 1500
+        : false;
     },
   });
 
@@ -222,7 +225,9 @@ export const StoryProfile: React.FC = () => {
   };
 
   const isAnalyzing =
-    analysisStatus?.status === "running" || analyzeMutation.isPending;
+    analysisStatus?.status === "running" ||
+    analysisStatus?.status === "waiting on rate limit" ||
+    analyzeMutation.isPending;
 
   if (isNaN(storyId)) {
     return (
@@ -267,6 +272,13 @@ export const StoryProfile: React.FC = () => {
         {/* Action / Status Controls */}
         <div className="flex items-center gap-3 w-full sm:w-auto justify-end flex-wrap">
           {/* Analysis progress indicator */}
+          {analysisStatus && analysisStatus.status === "waiting on rate limit" && (
+            <div className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-amber-100 dark:bg-amber-950/80 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-semibold animate-pulse">
+              <Clock className="w-3.5 h-3.5 text-amber-700 animate-spin" />
+              <span>Waiting on rate limit (cooling down)...</span>
+            </div>
+          )}
+
           {analysisStatus && analysisStatus.status === "running" && (
             <div className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900/60 text-amber-800 dark:text-amber-200 text-xs font-medium animate-pulse">
               <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-600" />
