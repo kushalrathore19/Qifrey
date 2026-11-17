@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -9,10 +9,13 @@ import {
   Quote,
   Loader2,
   CheckCircle,
+  ChevronRight,
+  ChevronLeft,
 } from "lucide-react";
 import {
   fetchStoryIssues,
   updateIssueStatus,
+  getGrammarStatus,
   type Issue,
   type IssueStatus,
   type IssueType,
@@ -21,13 +24,42 @@ import { useToast } from "../context/ToastContext";
 
 interface SidebarTabsProps {
   storyId: number;
+  currentChapterId?: number | null;
+  onSelectIssue?: (issue: Issue) => void;
+  onApplySuggestion?: (issue: Issue, suggestion: string) => void;
+  isCollapsible?: boolean;
 }
 
-export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
+export const SidebarTabs: React.FC<SidebarTabsProps> = ({
+  storyId,
+  currentChapterId,
+  onSelectIssue,
+  onApplySuggestion,
+  isCollapsible = false,
+}) => {
   const [activeTab, setActiveTab] = useState<IssueType>("contradiction");
   const [statusFilter, setStatusFilter] = useState<IssueStatus>("open");
+  const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
+    if (!isCollapsible) return false;
+    return localStorage.getItem("qifrey_sidebar_collapsed") === "true";
+  });
+
   const queryClient = useQueryClient();
   const { toast } = useToast();
+
+  const toggleCollapse = () => {
+    setIsCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem("qifrey_sidebar_collapsed", String(next));
+      return next;
+    });
+  };
+
+  // Check grammar checker availability (LanguageTool/Java)
+  const { data: grammarStatus } = useQuery({
+    queryKey: ["grammar-status"],
+    queryFn: getGrammarStatus,
+  });
 
   // Fetch open issues for count badges
   const { data: openContradictions = [] } = useQuery({
@@ -49,6 +81,18 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
       fetchStoryIssues(storyId, { type: activeTab, status: statusFilter }),
   });
 
+  // Sort issues so that current chapter issues appear first
+  const sortedIssues = useMemo(() => {
+    if (!currentChapterId) return issues;
+    return [...issues].sort((a, b) => {
+      const aIsCurrent = a.chapter_id === currentChapterId;
+      const bIsCurrent = b.chapter_id === currentChapterId;
+      if (aIsCurrent && !bIsCurrent) return -1;
+      if (!aIsCurrent && bIsCurrent) return 1;
+      return 0;
+    });
+  }, [issues, currentChapterId]);
+
   const statusMutation = useMutation({
     mutationFn: ({
       issueId,
@@ -66,7 +110,8 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
     },
   });
 
-  const handleAction = (issueId: number, status: IssueStatus) => {
+  const handleAction = (e: React.MouseEvent, issueId: number, status: IssueStatus) => {
+    e.stopPropagation();
     statusMutation.mutate({ issueId, status });
   };
 
@@ -79,44 +124,104 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
     }
   };
 
-  return (
-    <aside className="w-full lg:w-96 shrink-0 bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 flex flex-col h-full">
-      {/* Tab Navigation */}
-      <div className="p-3 border-b border-stone-200 dark:border-stone-800 bg-stone-50/60 dark:bg-stone-950/40">
-        <div className="flex rounded-xl bg-stone-200/70 dark:bg-stone-800/70 p-1">
+  if (isCollapsed) {
+    return (
+      <aside className="w-12 shrink-0 bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 flex flex-col items-center py-4 justify-between h-full transition-all">
+        <div className="flex flex-col items-center gap-4">
           <button
-            onClick={() => setActiveTab("contradiction")}
-            className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all ${
-              activeTab === "contradiction"
-                ? "bg-white dark:bg-stone-900 text-stone-900 dark:text-stone-100 shadow-xs"
-                : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
-            }`}
+            onClick={toggleCollapse}
+            className="p-1.5 rounded-lg hover:bg-stone-100 dark:hover:bg-stone-800 text-stone-600 dark:text-stone-300 transition-colors cursor-pointer"
+            title="Expand Insights Panel"
           >
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-            <span>Contradictions</span>
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab("contradiction");
+              toggleCollapse();
+            }}
+            className="relative p-2 rounded-lg hover:bg-stone-100 dark:hover:bg-stone-800 text-amber-600 cursor-pointer"
+            title="Contradictions"
+          >
+            <AlertTriangle className="w-4 h-4" />
             {openContradictions.length > 0 && (
-              <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 font-bold">
+              <span className="absolute -top-1 -right-1 px-1 py-0.2 text-[9px] font-bold rounded-full bg-amber-500 text-white">
                 {openContradictions.length}
               </span>
             )}
           </button>
 
           <button
-            onClick={() => setActiveTab("grammar")}
-            className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all ${
-              activeTab === "grammar"
-                ? "bg-white dark:bg-stone-900 text-stone-900 dark:text-stone-100 shadow-xs"
-                : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
-            }`}
+            onClick={() => {
+              setActiveTab("grammar");
+              toggleCollapse();
+            }}
+            className="relative p-2 rounded-lg hover:bg-stone-100 dark:hover:bg-stone-800 text-indigo-600 cursor-pointer"
+            title="Grammar"
           >
-            <SpellCheck className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-            <span>Grammar</span>
+            <SpellCheck className="w-4 h-4" />
             {openGrammar.length > 0 && (
-              <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-300 font-bold">
+              <span className="absolute -top-1 -right-1 px-1 py-0.2 text-[9px] font-bold rounded-full bg-indigo-500 text-white">
                 {openGrammar.length}
               </span>
             )}
           </button>
+        </div>
+      </aside>
+    );
+  }
+
+  return (
+    <aside className="w-full lg:w-96 shrink-0 bg-white dark:bg-stone-900 border-l border-stone-200 dark:border-stone-800 flex flex-col h-full">
+      {/* Tab Navigation */}
+      <div className="p-3 border-b border-stone-200 dark:border-stone-800 bg-stone-50/60 dark:bg-stone-950/40">
+        <div className="flex items-center gap-2">
+          <div className="flex-1 flex rounded-xl bg-stone-200/70 dark:bg-stone-800/70 p-1">
+            <button
+              onClick={() => setActiveTab("contradiction")}
+              className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                activeTab === "contradiction"
+                  ? "bg-white dark:bg-stone-900 text-stone-900 dark:text-stone-100 shadow-xs"
+                  : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+              <span>Contradictions</span>
+              {openContradictions.length > 0 && (
+                <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 font-bold">
+                  {openContradictions.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => setActiveTab("grammar")}
+              className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                activeTab === "grammar"
+                  ? "bg-white dark:bg-stone-900 text-stone-900 dark:text-stone-100 shadow-xs"
+                  : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
+              }`}
+            >
+              <SpellCheck className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+              <span>Grammar</span>
+              {openGrammar.length > 0 && (
+                <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-300 font-bold">
+                  {openGrammar.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {isCollapsible && (
+            <button
+              onClick={toggleCollapse}
+              className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-stone-800 text-stone-500 dark:text-stone-400 transition-colors cursor-pointer"
+              title="Collapse sidebar"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          )}
         </div>
 
         {/* Filter bar */}
@@ -127,7 +232,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
           <div className="flex gap-1.5">
             <button
               onClick={() => setStatusFilter("open")}
-              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                 statusFilter === "open"
                   ? "bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900"
                   : "text-stone-500 hover:bg-stone-100 dark:hover:bg-stone-800"
@@ -137,7 +242,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
             </button>
             <button
               onClick={() => setStatusFilter("dismissed")}
-              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                 statusFilter === "dismissed"
                   ? "bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900"
                   : "text-stone-500 hover:bg-stone-100 dark:hover:bg-stone-800"
@@ -149,6 +254,16 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
         </div>
       </div>
 
+      {/* Grammar checker unavailable status warning banner */}
+      {activeTab === "grammar" && grammarStatus && !grammarStatus.available && (
+        <div className="p-3 bg-amber-50 dark:bg-amber-950/60 border-b border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-200 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span className="font-medium">
+            Grammar checker unavailable (Java not found). Install Java runtime for live grammar checks.
+          </span>
+        </div>
+      )}
+
       {/* Issues list container */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3.5">
         {isLoading && (
@@ -158,7 +273,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
           </div>
         )}
 
-        {!isLoading && issues.length === 0 && (
+        {!isLoading && sortedIssues.length === 0 && (
           <div className="py-16 text-center text-stone-400 dark:text-stone-500 px-4">
             <CheckCircle className="w-10 h-10 mx-auto mb-2 text-stone-300 dark:text-stone-700 stroke-1" />
             <p className="text-sm font-medium">
@@ -172,21 +287,32 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
           </div>
         )}
 
-        {issues.map((item: Issue) => {
+        {sortedIssues.map((item: Issue) => {
           const suggestions = parseSuggestions(item.suggestions_json);
+          const isCurrentChapter = currentChapterId && item.chapter_id === currentChapterId;
 
           return (
             <div
               key={item.id}
-              className="p-3.5 rounded-xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 hover:shadow-sm transition-shadow text-xs space-y-2.5"
+              onClick={() => onSelectIssue?.(item)}
+              className={`p-3.5 rounded-xl border bg-white dark:bg-stone-900 hover:shadow-md transition-all text-xs space-y-2.5 cursor-pointer ${
+                isCurrentChapter
+                  ? "border-amber-400 dark:border-amber-600/70 shadow-xs"
+                  : "border-stone-200 dark:border-stone-800"
+              }`}
             >
               {/* Header */}
               <div className="flex items-center justify-between">
-                <span className="font-semibold px-2 py-0.5 rounded-md bg-stone-100 dark:bg-stone-800 text-stone-700 dark:text-stone-300">
-                  {item.chapter_id
-                    ? `Chapter ${item.chapter_id}`
-                    : "Manuscript"}
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-semibold px-2 py-0.5 rounded-md bg-stone-100 dark:bg-stone-800 text-stone-700 dark:text-stone-300">
+                    {item.chapter_id ? `Chapter ${item.chapter_id}` : "Manuscript"}
+                  </span>
+                  {isCurrentChapter && (
+                    <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300">
+                      Current
+                    </span>
+                  )}
+                </div>
                 <span
                   className={`capitalize px-2 py-0.5 rounded-md text-[10px] font-bold ${
                     item.status === "open"
@@ -218,16 +344,22 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
                 <div className="bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200/60 dark:border-indigo-900/60 p-2 rounded-lg">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-700 dark:text-indigo-300 flex items-center gap-1 mb-1">
                     <Sparkles className="w-2.5 h-2.5" />
-                    Suggested Replacements:
+                    Suggested Replacements (click to apply):
                   </span>
                   <div className="flex flex-wrap gap-1">
                     {suggestions.map((s, idx) => (
-                      <span
+                      <button
                         key={idx}
-                        className="px-1.5 py-0.5 bg-white dark:bg-stone-900 text-indigo-900 dark:text-indigo-200 rounded font-semibold text-[11px] border border-indigo-200 dark:border-indigo-800"
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onApplySuggestion?.(item, s);
+                        }}
+                        className="px-2 py-0.5 bg-white dark:bg-stone-900 hover:bg-indigo-100 dark:hover:bg-indigo-900 text-indigo-900 dark:text-indigo-200 rounded font-semibold text-[11px] border border-indigo-200 dark:border-indigo-800 cursor-pointer transition-colors shadow-2xs"
+                        title="Apply suggestion to editor text"
                       >
                         {s}
-                      </span>
+                      </button>
                     ))}
                   </div>
                 </div>
@@ -238,7 +370,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
                 {item.status === "open" ? (
                   <>
                     <button
-                      onClick={() => handleAction(item.id, "dismissed")}
+                      onClick={(e) => handleAction(e, item.id, "dismissed")}
                       disabled={statusMutation.isPending}
                       className="flex-1 py-1 px-2 rounded-lg border border-stone-300 dark:border-stone-700 hover:bg-stone-100 dark:hover:bg-stone-800 text-stone-700 dark:text-stone-300 text-[11px] font-medium flex items-center justify-center gap-1 transition-colors cursor-pointer"
                       title="Dismiss this issue"
@@ -248,7 +380,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
                     </button>
 
                     <button
-                      onClick={() => handleAction(item.id, "accepted")}
+                      onClick={(e) => handleAction(e, item.id, "accepted")}
                       disabled={statusMutation.isPending}
                       className="flex-1 py-1 px-2 rounded-lg border border-emerald-300 dark:border-emerald-800 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 text-[11px] font-medium flex items-center justify-center gap-1 transition-colors cursor-pointer"
                       title="Accept suggested correction"
@@ -259,7 +391,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
 
                     {item.type === "contradiction" && (
                       <button
-                        onClick={() => handleAction(item.id, "intentional")}
+                        onClick={(e) => handleAction(e, item.id, "intentional")}
                         disabled={statusMutation.isPending}
                         className="py-1 px-2 rounded-lg border border-amber-300 dark:border-amber-800 hover:bg-amber-50 dark:hover:bg-amber-950/50 text-amber-800 dark:text-amber-300 text-[11px] font-medium transition-colors cursor-pointer"
                         title="Mark as intentional author decision"
@@ -270,7 +402,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({ storyId }) => {
                   </>
                 ) : (
                   <button
-                    onClick={() => handleAction(item.id, "open")}
+                    onClick={(e) => handleAction(e, item.id, "open")}
                     disabled={statusMutation.isPending}
                     className="py-1 px-2.5 rounded-lg border border-stone-300 dark:border-stone-700 hover:bg-stone-100 dark:hover:bg-stone-800 text-stone-600 dark:text-stone-400 text-[11px] font-medium transition-colors cursor-pointer"
                   >

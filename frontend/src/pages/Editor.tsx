@@ -20,6 +20,8 @@ import {
   Loader2,
   Play,
   FileText,
+  AlertTriangle,
+  Clock,
 } from "lucide-react";
 import {
   getStory,
@@ -30,18 +32,30 @@ import {
   deleteChapter,
   checkChapterGrammar,
   analyzeStory,
+  analyzeChapter,
   getAnalysisStatus,
+  updateIssueStatus,
   type Chapter,
   type GrammarIssue,
+  type Issue,
 } from "../api/client";
 import { useToast } from "../context/ToastContext";
 import { useTheme } from "../context/ThemeContext";
+import { SidebarTabs } from "../components/SidebarTabs";
 
 function countWords(str: string): number {
   if (!str) return 0;
   const match = str.trim().match(/\S+/g);
   return match ? match.length : 0;
 }
+
+type SaveStatus = "saved" | "saving" | "unsaved" | "error";
+type LiveStatus =
+  | "up_to_date"
+  | "analyzing"
+  | "waiting_rate_limit"
+  | "paused_rate_limit"
+  | "failed";
 
 export const Editor: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -50,24 +64,42 @@ export const Editor: React.FC = () => {
   const { toast } = useToast();
   const { theme } = useTheme();
 
+  // Mode toggle: Live | Manual (persisted in localStorage)
+  const [analysisMode, setAnalysisMode] = useState<"live" | "manual">(() => {
+    const saved = localStorage.getItem("qifrey_editor_mode");
+    return saved === "manual" ? "manual" : "live";
+  });
+
   // Selected chapter state
   const [selectedChapterId, setSelectedChapterId] = useState<number | null>(
     null,
   );
   const [activeTitle, setActiveTitle] = useState<string>("");
   const [activeText, setActiveText] = useState<string>("");
-  const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "unsaved">(
-    "saved",
-  );
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
+  const [liveAnalysisStatus, setLiveAnalysisStatus] =
+    useState<LiveStatus>("up_to_date");
   const [grammarIssues, setGrammarIssues] = useState<GrammarIssue[]>([]);
   const [draggedChapterIndex, setDraggedChapterIndex] = useState<number | null>(
     null,
   );
 
-  // Auto-save debounce timer ref
+  // Active highlighted range in CodeMirror
+  const [highlightRange, setHighlightRange] = useState<{
+    from: number;
+    to: number;
+  } | null>(null);
+
+  // Timers and state refs
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const grammarTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveAnalysisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const loadedChapterIdRef = useRef<number | null>(null);
+  const saveSeqRef = useRef<number>(0);
+  const pendingHighlightRef = useRef<Issue | null>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
 
   // Fetch Story metadata
   const { data: story } = useQuery({
@@ -85,8 +117,9 @@ export const Editor: React.FC = () => {
 
   const activeChapterId =
     selectedChapterId ?? (chapters.length > 0 ? chapters[0].id : null);
+  const activeChapter = chapters.find((c) => c.id === activeChapterId);
 
-  // Track latest edits for immediate save before analyze
+  // Track latest edits for immediate save
   const activeChapterRef = useRef({
     id: activeChapterId,
     title: activeTitle,
@@ -100,6 +133,11 @@ export const Editor: React.FC = () => {
     };
   }, [activeChapterId, activeTitle, activeText]);
 
+  const saveStatusRef = useRef<SaveStatus>(saveStatus);
+  useEffect(() => {
+    saveStatusRef.current = saveStatus;
+  }, [saveStatus]);
+
   // Fetch active chapter detail (with text)
   const { data: currentChapterDetail } = useQuery({
     queryKey: ["chapter", activeChapterId],
@@ -107,57 +145,175 @@ export const Editor: React.FC = () => {
     enabled: !!activeChapterId,
   });
 
-  // Perform backend save
+  // Perform backend save with sequence checking
   const performSave = useCallback(
     async (chapId: number, titleToSave: string, textToSave: string) => {
+      const seq = ++saveSeqRef.current;
       setSaveStatus("saving");
       try {
         await updateChapter(chapId, {
           title: titleToSave,
           text: textToSave,
         });
-        setSaveStatus("saved");
-        queryClient.invalidateQueries({ queryKey: ["chapters", storyId] });
+        if (seq === saveSeqRef.current) {
+          setSaveStatus("saved");
+          // Remove persisted draft once confirmed
+          localStorage.removeItem(`qifrey_draft_${chapId}`);
+          queryClient.invalidateQueries({ queryKey: ["chapters", storyId] });
+        }
       } catch (err) {
-        setSaveStatus("unsaved");
-        toast(`Auto-save failed: ${(err as Error).message}`, "error");
+        if (seq === saveSeqRef.current) {
+          setSaveStatus("error");
+          toast(`Auto-save failed: ${(err as Error).message}`, "error");
+        }
       }
     },
     [queryClient, storyId, toast],
   );
 
-  // Trigger grammar check
+  // Trigger fast grammar check (debounced ~1s, no LLM)
   const triggerGrammarCheck = useCallback(
     async (chapId: number, text: string) => {
       try {
         const issues = await checkChapterGrammar(chapId, text);
         setGrammarIssues(issues);
       } catch {
-        // Silently degrade if grammar service unavailable
         setGrammarIssues([]);
       }
     },
     [],
   );
 
-  // When active chapter detail loads, sync local editor state
+  // Trigger live story analysis (debounced ~8s idle for changed chapter only)
+  const triggerLiveAnalysis = useCallback(
+    async (chapId: number) => {
+      if (analysisMode !== "live") return;
+      setLiveAnalysisStatus("analyzing");
+      try {
+        await analyzeChapter(chapId);
+        setLiveAnalysisStatus("up_to_date");
+        queryClient.invalidateQueries({ queryKey: ["issues", storyId] });
+        queryClient.invalidateQueries({ queryKey: ["story", storyId] });
+        queryClient.invalidateQueries({ queryKey: ["chapters", storyId] });
+      } catch (err: unknown) {
+        const errObj = err as {
+          message?: string;
+          response?: { status?: number };
+        };
+        const errMsg = (errObj?.message || "").toLowerCase();
+        const status = errObj?.response?.status;
+        if (
+          status === 429 ||
+          errMsg.includes("rate limit") ||
+          errMsg.includes("daily budget") ||
+          errMsg.includes("resource_exhausted")
+        ) {
+          setLiveAnalysisStatus("paused_rate_limit");
+          setAnalysisMode("manual");
+          localStorage.setItem("qifrey_editor_mode", "manual");
+          toast(
+            "Paused: rate limit reached. Switched to Manual mode.",
+            "error",
+          );
+        } else {
+          setLiveAnalysisStatus("failed");
+        }
+      }
+    },
+    [analysisMode, queryClient, storyId, toast],
+  );
+
+  // Highlight an issue in text and scroll to it
+  const highlightIssueInText = useCallback(
+    (issue: Issue, currentText: string) => {
+      let from = -1;
+      let to = -1;
+
+      if (issue.quote && currentText.includes(issue.quote)) {
+        from = currentText.indexOf(issue.quote);
+        to = from + issue.quote.length;
+      } else if (
+        issue.span_start !== null &&
+        issue.span_end !== null &&
+        issue.span_start >= 0 &&
+        issue.span_end <= currentText.length &&
+        issue.span_start < issue.span_end
+      ) {
+        from = issue.span_start;
+        to = issue.span_end;
+      }
+
+      if (from !== -1 && to !== -1) {
+        setHighlightRange({ from, to });
+        if (editorViewRef.current) {
+          editorViewRef.current.dispatch({
+            selection: { anchor: from, head: to },
+            effects: EditorView.scrollIntoView(from, { y: "center" }),
+          });
+        }
+      }
+    },
+    [],
+  );
+
+  // When active chapter detail loads, sync local editor state and restore local drafts if newer
   useEffect(() => {
     if (
       currentChapterDetail &&
       loadedChapterIdRef.current !== currentChapterDetail.id
     ) {
       loadedChapterIdRef.current = currentChapterDetail.id;
-      setActiveTitle(currentChapterDetail.title);
-      setActiveText(currentChapterDetail.text || "");
-      setSaveStatus("saved");
-      triggerGrammarCheck(
-        currentChapterDetail.id,
-        currentChapterDetail.text || "",
-      );
-    }
-  }, [currentChapterDetail, triggerGrammarCheck]);
 
-  // Fetch Analysis Status with conditional polling
+      // Check for locally unsaved draft
+      const draftKey = `qifrey_draft_${currentChapterDetail.id}`;
+      const savedDraftRaw = localStorage.getItem(draftKey);
+      let textToLoad = currentChapterDetail.text || "";
+      let titleToLoad = currentChapterDetail.title || "";
+      let hasDraft = false;
+
+      if (savedDraftRaw) {
+        try {
+          const draft = JSON.parse(savedDraftRaw);
+          if (draft.text !== undefined && draft.text !== textToLoad) {
+            textToLoad = draft.text;
+            if (draft.title) titleToLoad = draft.title;
+            hasDraft = true;
+          }
+        } catch {
+          // ignore draft json parse errors
+        }
+      }
+
+      setActiveTitle(titleToLoad);
+      setActiveText(textToLoad);
+      setHighlightRange(null);
+
+      if (hasDraft) {
+        setSaveStatus("unsaved");
+        performSave(currentChapterDetail.id, titleToLoad, textToLoad);
+      } else {
+        setSaveStatus("saved");
+      }
+
+      triggerGrammarCheck(currentChapterDetail.id, textToLoad);
+
+      // Check if there was a pending highlight request
+      if (pendingHighlightRef.current) {
+        const issue = pendingHighlightRef.current;
+        pendingHighlightRef.current = null;
+        setTimeout(() => {
+          highlightIssueInText(issue, textToLoad);
+        }, 150);
+      }
+    }
+  }, [
+    currentChapterDetail,
+    triggerGrammarCheck,
+    performSave,
+    highlightIssueInText,
+  ]);
+
+  // Analysis status polling
   const { data: analysisStatus } = useQuery({
     queryKey: ["analysis-status", storyId],
     queryFn: () => getAnalysisStatus(storyId),
@@ -168,46 +324,119 @@ export const Editor: React.FC = () => {
     },
   });
 
-  // Invalidate queries on analysis completion
+  // Derive effective live analysis status including global analysis polling status
+  const effectiveLiveStatus: LiveStatus = useMemo(() => {
+    if (
+      analysisStatus?.rate_limit_active ||
+      analysisStatus?.status === "waiting on rate limit"
+    ) {
+      return "waiting_rate_limit";
+    }
+    return liveAnalysisStatus;
+  }, [analysisStatus, liveAnalysisStatus]);
+
+  // Invalidate queries on full analysis completion
   useEffect(() => {
     if (analysisStatus?.status === "completed") {
       queryClient.invalidateQueries({ queryKey: ["story", storyId] });
       queryClient.invalidateQueries({ queryKey: ["chapters", storyId] });
+      queryClient.invalidateQueries({ queryKey: ["issues", storyId] });
     }
   }, [analysisStatus?.status, queryClient, storyId]);
 
-  // Schedule auto-save (1.5s debounce)
-  const scheduleAutoSave = useCallback(
+  // Schedule auto-save (500ms debounce), grammar check (1000ms), and live analysis (8000ms)
+  const scheduleEdits = useCallback(
     (chapId: number, nextTitle: string, nextText: string) => {
       setSaveStatus("unsaved");
+
+      // Save draft immediately to localStorage so reload never loses text
+      localStorage.setItem(
+        `qifrey_draft_${chapId}`,
+        JSON.stringify({
+          title: nextTitle,
+          text: nextText,
+          timestamp: Date.now(),
+        }),
+      );
+
+      // 500ms debounce auto-save
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
         performSave(chapId, nextTitle, nextText);
-      }, 1500);
+      }, 500);
 
-      // Debounce grammar check (1000ms)
+      // 1000ms debounce grammar check
       if (grammarTimerRef.current) clearTimeout(grammarTimerRef.current);
       grammarTimerRef.current = setTimeout(() => {
         triggerGrammarCheck(chapId, nextText);
       }, 1000);
+
+      // 8000ms debounce live story analysis (coalesce rapid edits)
+      if (liveAnalysisTimerRef.current)
+        clearTimeout(liveAnalysisTimerRef.current);
+      if (analysisMode === "live") {
+        liveAnalysisTimerRef.current = setTimeout(() => {
+          triggerLiveAnalysis(chapId);
+        }, 8000);
+      }
     },
-    [performSave, triggerGrammarCheck],
+    [performSave, triggerGrammarCheck, triggerLiveAnalysis, analysisMode],
   );
 
-  // Switch active chapter (ensures current changes saved first)
-  const handleSelectChapter = async (targetChapter: Chapter) => {
-    if (targetChapter.id === activeChapterId) return;
+  // Unload & beforeunload listeners to ensure no text is lost
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      const cur = activeChapterRef.current;
+      if (cur.id) {
+        localStorage.setItem(
+          `qifrey_draft_${cur.id}`,
+          JSON.stringify({
+            title: cur.title,
+            text: cur.text,
+            timestamp: Date.now(),
+          }),
+        );
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      // Route change flush
+      const cur = activeChapterRef.current;
+      if (cur.id && saveStatusRef.current === "unsaved") {
+        performSave(cur.id, cur.title, cur.text);
+      }
+    };
+  }, [performSave]);
 
-    if (saveStatus === "unsaved" && activeChapterId) {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      await performSave(activeChapterId, activeTitle, activeText);
+  // Mode change handler
+  const handleModeChange = (mode: "live" | "manual") => {
+    setAnalysisMode(mode);
+    localStorage.setItem("qifrey_editor_mode", mode);
+    if (mode === "live" && activeChapterId) {
+      setLiveAnalysisStatus("up_to_date");
+      triggerLiveAnalysis(activeChapterId);
     }
-
-    setSelectedChapterId(targetChapter.id);
-    setActiveTitle(targetChapter.title);
-    setActiveText(targetChapter.text || "");
-    setGrammarIssues([]);
   };
+
+  // Switch active chapter (flush current changes first)
+  const handleSelectChapter = useCallback(
+    async (targetChapter: Chapter) => {
+      if (targetChapter.id === activeChapterId) return;
+
+      if (saveStatus === "unsaved" && activeChapterId) {
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        await performSave(activeChapterId, activeTitle, activeText);
+      }
+
+      setSelectedChapterId(targetChapter.id);
+      setActiveTitle(targetChapter.title);
+      setActiveText(targetChapter.text || "");
+      setGrammarIssues([]);
+      setHighlightRange(null);
+    },
+    [activeChapterId, saveStatus, activeTitle, activeText, performSave],
+  );
 
   // Add chapter mutation
   const addChapterMutation = useMutation({
@@ -269,7 +498,6 @@ export const Editor: React.FC = () => {
     const targetChap = chapters[targetIndex];
 
     try {
-      // Swap their index values
       await updateChapter(currentChap.id, { index: targetChap.index });
       await updateChapter(targetChap.id, { index: currentChap.index });
       queryClient.invalidateQueries({ queryKey: ["chapters", storyId] });
@@ -300,7 +528,6 @@ export const Editor: React.FC = () => {
     setDraggedChapterIndex(null);
 
     try {
-      // Update indices sequentially
       await Promise.all(
         reordered.map((chap, idx) =>
           updateChapter(chap.id, { index: idx + 1 }),
@@ -312,10 +539,9 @@ export const Editor: React.FC = () => {
     }
   };
 
-  // Analyze mutation
+  // Full manual Analyze mutation
   const analyzeMutation = useMutation({
     mutationFn: async () => {
-      // Ensure current changes are flushed first
       const current = activeChapterRef.current;
       if (current.id && saveStatus === "unsaved") {
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -334,6 +560,74 @@ export const Editor: React.FC = () => {
 
   const isAnalyzing =
     analysisStatus?.status === "running" || analyzeMutation.isPending;
+
+  // Handle selecting an issue from the side panel
+  const handleSelectIssue = useCallback(
+    (issue: Issue) => {
+      const targetChapterId = issue.chapter_id;
+      if (targetChapterId && targetChapterId !== activeChapterId) {
+        const target = chapters.find((c) => c.id === targetChapterId);
+        if (target) {
+          pendingHighlightRef.current = issue;
+          handleSelectChapter(target);
+          return;
+        }
+      }
+      highlightIssueInText(issue, activeText);
+    },
+    [
+      activeChapterId,
+      chapters,
+      activeText,
+      highlightIssueInText,
+      handleSelectChapter,
+    ],
+  );
+
+  // Handle applying grammar suggestions directly into text
+  const handleApplySuggestion = useCallback(
+    async (issue: Issue, suggestion: string) => {
+      if (!activeChapterId) return;
+      let from = -1;
+      let to = -1;
+
+      if (issue.quote && activeText.includes(issue.quote)) {
+        from = activeText.indexOf(issue.quote);
+        to = from + issue.quote.length;
+      } else if (
+        issue.span_start !== null &&
+        issue.span_end !== null &&
+        issue.span_start >= 0 &&
+        issue.span_end <= activeText.length
+      ) {
+        from = issue.span_start;
+        to = issue.span_end;
+      }
+
+      if (from !== -1 && to !== -1) {
+        const nextText =
+          activeText.slice(0, from) + suggestion + activeText.slice(to);
+        setActiveText(nextText);
+        scheduleEdits(activeChapterId, activeTitle, nextText);
+        try {
+          await updateIssueStatus(issue.id, "accepted");
+          queryClient.invalidateQueries({ queryKey: ["issues", storyId] });
+          toast(`Applied suggestion: "${suggestion}"`, "success");
+        } catch (err) {
+          toast(`Failed to update issue: ${(err as Error).message}`, "error");
+        }
+      }
+    },
+    [
+      activeChapterId,
+      activeText,
+      activeTitle,
+      scheduleEdits,
+      queryClient,
+      storyId,
+      toast,
+    ],
+  );
 
   // CodeMirror Theme styling
   const editorTheme = useMemo(() => {
@@ -391,6 +685,27 @@ export const Editor: React.FC = () => {
 
     return EditorView.decorations.of(builder.finish());
   }, [grammarIssues, activeText.length]);
+
+  // Active Highlight Decoration for selected issues
+  const activeHighlightDecoration = useMemo(() => {
+    if (!highlightRange || highlightRange.from >= highlightRange.to) {
+      return EditorView.decorations.of(
+        new RangeSetBuilder<Decoration>().finish(),
+      );
+    }
+    const builder = new RangeSetBuilder<Decoration>();
+    const mark = Decoration.mark({
+      class:
+        "bg-amber-200/80 dark:bg-amber-800/60 ring-2 ring-amber-500 rounded px-0.5",
+    });
+    if (
+      highlightRange.from < activeText.length &&
+      highlightRange.to <= activeText.length
+    ) {
+      builder.add(highlightRange.from, highlightRange.to, mark);
+    }
+    return EditorView.decorations.of(builder.finish());
+  }, [highlightRange, activeText.length]);
 
   // CodeMirror Tooltip with click-to-apply suggestions
   const grammarTooltipExtension = useMemo(() => {
@@ -465,9 +780,15 @@ export const Editor: React.FC = () => {
       EditorView.lineWrapping,
       editorTheme,
       grammarDecorations,
+      activeHighlightDecoration,
       grammarTooltipExtension,
     ];
-  }, [editorTheme, grammarDecorations, grammarTooltipExtension]);
+  }, [
+    editorTheme,
+    grammarDecorations,
+    activeHighlightDecoration,
+    grammarTooltipExtension,
+  ]);
 
   const activeWordCount = useMemo(() => countWords(activeText), [activeText]);
 
@@ -495,7 +816,7 @@ export const Editor: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Save Status indicator */}
+          {/* Save Status Indicator */}
           <div className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg">
             {saveStatus === "saving" && (
               <span className="flex items-center gap-1 text-amber-700 dark:text-amber-400">
@@ -505,7 +826,7 @@ export const Editor: React.FC = () => {
             )}
             {saveStatus === "saved" && (
               <span className="flex items-center gap-1 text-stone-400 dark:text-stone-500">
-                <Check className="w-3.5 h-3.5" />
+                <Check className="w-3.5 h-3.5 text-emerald-600" />
                 <span>Saved</span>
               </span>
             )}
@@ -515,9 +836,97 @@ export const Editor: React.FC = () => {
                 <span>Unsaved</span>
               </span>
             )}
+            {saveStatus === "error" && (
+              <span className="flex items-center gap-1 text-rose-600 dark:text-rose-400">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span>Save error</span>
+                {activeChapterId && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      performSave(activeChapterId, activeTitle, activeText)
+                    }
+                    className="ml-1 underline font-semibold cursor-pointer"
+                  >
+                    Retry
+                  </button>
+                )}
+              </span>
+            )}
           </div>
 
-          {/* Analysis status badge */}
+          {/* Mode Toggle: Live | Manual */}
+          <div className="flex items-center bg-stone-100 dark:bg-stone-800 rounded-lg p-0.5 border border-stone-200 dark:border-stone-700 text-xs font-medium">
+            <button
+              type="button"
+              onClick={() => handleModeChange("live")}
+              className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                analysisMode === "live"
+                  ? "bg-white dark:bg-stone-900 text-amber-700 dark:text-amber-400 shadow-2xs font-semibold"
+                  : "text-stone-500 hover:text-stone-800 dark:hover:text-stone-200"
+              }`}
+            >
+              Live
+            </button>
+            <button
+              type="button"
+              onClick={() => handleModeChange("manual")}
+              className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                analysisMode === "manual"
+                  ? "bg-white dark:bg-stone-900 text-stone-800 dark:text-stone-200 shadow-2xs font-semibold"
+                  : "text-stone-500 hover:text-stone-800 dark:hover:text-stone-200"
+              }`}
+            >
+              Manual
+            </button>
+          </div>
+
+          {/* Status Chip in Header */}
+          {analysisMode === "live" && (
+            <div className="flex items-center">
+              {effectiveLiveStatus === "analyzing" && (
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-xs font-medium">
+                  <Loader2 className="w-3 h-3 animate-spin text-amber-600" />
+                  <span>Analyzing chapter {activeChapter?.index || 1}...</span>
+                </div>
+              )}
+              {effectiveLiveStatus === "waiting_rate_limit" && (
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-xs font-medium">
+                  <Clock className="w-3 h-3 text-amber-600" />
+                  <span>Waiting on rate limit</span>
+                </div>
+              )}
+              {effectiveLiveStatus === "paused_rate_limit" && (
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/60 border border-rose-300 dark:border-rose-800 text-rose-800 dark:text-rose-200 text-xs font-medium">
+                  <AlertTriangle className="w-3 h-3 text-rose-600" />
+                  <span>Paused: rate limit</span>
+                </div>
+              )}
+              {effectiveLiveStatus === "failed" && (
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/60 border border-rose-200 text-rose-800 dark:text-rose-200 text-xs font-medium">
+                  <AlertTriangle className="w-3 h-3 text-rose-600" />
+                  <span>Analysis failed</span>
+                  {activeChapterId && (
+                    <button
+                      type="button"
+                      onClick={() => triggerLiveAnalysis(activeChapterId)}
+                      className="underline ml-0.5 cursor-pointer font-semibold"
+                    >
+                      (retry)
+                    </button>
+                  )}
+                </div>
+              )}
+              {effectiveLiveStatus === "up_to_date" && (
+                <div className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-stone-500 dark:text-stone-400 bg-stone-100 dark:bg-stone-800">
+                  <Check className="w-3 h-3 text-emerald-600" />
+                  <span>Up to date</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Full Story Analysis status badge (for manual run or running state) */}
           {analysisStatus && analysisStatus.status === "running" && (
             <div className="flex items-center gap-2 px-3 py-1 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900/60 text-amber-800 dark:text-amber-200 text-xs font-medium">
               <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-600" />
@@ -525,8 +934,9 @@ export const Editor: React.FC = () => {
             </div>
           )}
 
-          {/* Analyze Button */}
+          {/* Manual Analyze Button */}
           <button
+            type="button"
             onClick={() => analyzeMutation.mutate()}
             disabled={isAnalyzing}
             className="px-3.5 py-1.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-xs font-medium shadow-sm disabled:opacity-50 flex items-center gap-1.5 transition-all cursor-pointer"
@@ -546,15 +956,16 @@ export const Editor: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Split Layout: Left Chapter List + Center CodeMirror Editor */}
+      {/* Main Split Layout: Left Chapters + Center Editor + Right Side Panel */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Chapter Sidebar */}
-        <aside className="w-64 sm:w-72 border-r border-stone-200 dark:border-stone-800 bg-stone-100/70 dark:bg-stone-900/40 flex flex-col shrink-0">
+        <aside className="w-60 sm:w-64 border-r border-stone-200 dark:border-stone-800 bg-stone-100/70 dark:bg-stone-900/40 flex flex-col shrink-0">
           <div className="p-4 border-b border-stone-200 dark:border-stone-800 flex items-center justify-between">
             <h2 className="text-xs font-bold uppercase tracking-wider text-stone-500 dark:text-stone-400">
               Chapters
             </h2>
             <button
+              type="button"
               onClick={() => addChapterMutation.mutate()}
               disabled={addChapterMutation.isPending}
               className="p-1 rounded-lg hover:bg-stone-200 dark:hover:bg-stone-800 text-stone-600 dark:text-stone-300 transition-colors cursor-pointer"
@@ -661,7 +1072,7 @@ export const Editor: React.FC = () => {
         </aside>
 
         {/* Center Editor Panel */}
-        <main className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-stone-950">
+        <main className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-stone-950 min-w-0">
           {activeChapterId ? (
             <>
               {/* Editable Title Header + Word Count */}
@@ -673,7 +1084,14 @@ export const Editor: React.FC = () => {
                     const nextTitle = e.target.value;
                     setActiveTitle(nextTitle);
                     if (activeChapterId) {
-                      scheduleAutoSave(activeChapterId, nextTitle, activeText);
+                      scheduleEdits(activeChapterId, nextTitle, activeText);
+                    }
+                  }}
+                  onBlur={() => {
+                    if (activeChapterId && saveStatus === "unsaved") {
+                      if (saveTimerRef.current)
+                        clearTimeout(saveTimerRef.current);
+                      performSave(activeChapterId, activeTitle, activeText);
                     }
                   }}
                   className="font-serif text-xl font-bold bg-transparent border-b border-transparent hover:border-stone-300 dark:hover:border-stone-700 focus:border-amber-600 focus:outline-none text-stone-900 dark:text-stone-100 px-1 py-0.5 w-full max-w-lg transition-colors"
@@ -691,10 +1109,20 @@ export const Editor: React.FC = () => {
                   height="100%"
                   theme={theme === "dark" ? "dark" : "light"}
                   extensions={extensions}
+                  onCreateEditor={(view) => {
+                    editorViewRef.current = view;
+                  }}
+                  onBlur={() => {
+                    if (activeChapterId && saveStatus === "unsaved") {
+                      if (saveTimerRef.current)
+                        clearTimeout(saveTimerRef.current);
+                      performSave(activeChapterId, activeTitle, activeText);
+                    }
+                  }}
                   onChange={(val) => {
                     setActiveText(val);
                     if (activeChapterId) {
-                      scheduleAutoSave(activeChapterId, activeTitle, val);
+                      scheduleEdits(activeChapterId, activeTitle, val);
                     }
                   }}
                   className="h-full"
@@ -708,6 +1136,7 @@ export const Editor: React.FC = () => {
                 Select or create a chapter to begin writing.
               </p>
               <button
+                type="button"
                 onClick={() => addChapterMutation.mutate()}
                 className="px-4 py-2 rounded-xl bg-amber-700 text-white text-xs font-medium hover:bg-amber-800 transition-colors"
               >
@@ -716,6 +1145,15 @@ export const Editor: React.FC = () => {
             </div>
           )}
         </main>
+
+        {/* Right Insights Side Panel (Contradictions & Grammar) */}
+        <SidebarTabs
+          storyId={storyId}
+          currentChapterId={activeChapterId}
+          onSelectIssue={handleSelectIssue}
+          onApplySuggestion={handleApplySuggestion}
+          isCollapsible={true}
+        />
       </div>
     </div>
   );

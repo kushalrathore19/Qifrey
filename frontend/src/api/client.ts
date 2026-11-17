@@ -174,6 +174,7 @@ export interface AnalysisStatus {
   current_chapter: number;
   total_chapters: number;
   error: string | null;
+  rate_limit_active?: boolean;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -237,6 +238,23 @@ export async function analyzeStory(
   return request<{ detail: string }>(`/stories/${storyId}/analyze`, {
     method: "POST",
   });
+}
+
+export async function analyzeChapter(
+  chapterId: number,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/chapters/${chapterId}/analyze`, {
+    method: "POST",
+  });
+}
+
+export async function getGrammarStatus(): Promise<{
+  available: boolean;
+  message: string | null;
+}> {
+  return request<{ available: boolean; message: string | null }>(
+    "/grammar/status",
+  );
 }
 
 export async function getAnalysisStatus(
