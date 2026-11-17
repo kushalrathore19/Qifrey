@@ -81,6 +81,89 @@ def scan_known_characters(text: str, characters: list[Character]) -> list[Charac
     return matched
 
 
+def find_recently_mentioned_characters(
+    text: str,
+    known_characters: list[Character] | None = None,
+    limit: int = 2,
+) -> list[str]:
+    """Find the last 1-2 character names mentioned in the text for pronoun resolution hints.
+
+    Scans for known canonical names/aliases first. If none or fewer than limit,
+    scans for proper person names mentioned in the text.
+    """
+    recent: list[tuple[int, str]] = []
+
+    if known_characters:
+        text_lower = text.lower()
+        for char in known_characters:
+            names = [char.canonical_name] + [a.name for a in char.aliases]
+            last_pos = -1
+            for n in names:
+                clean_n = n.strip().lower()
+                if not clean_n:
+                    continue
+                pos = text_lower.rfind(clean_n)
+                if pos > last_pos:
+                    last_pos = pos
+            if last_pos != -1:
+                recent.append((last_pos, char.canonical_name))
+
+    # If no known characters found, scan text for proper names
+    if not recent:
+        stopwords = {
+            "chapter",
+            "part",
+            "the",
+            "a",
+            "an",
+            "they",
+            "there",
+            "then",
+            "when",
+            "while",
+            "where",
+            "what",
+            "how",
+            "why",
+            "but",
+            "and",
+            "so",
+            "after",
+            "before",
+            "in",
+            "on",
+            "at",
+            "to",
+            "for",
+            "with",
+            "without",
+            "as",
+            "by",
+            "from",
+            "it",
+            "this",
+            "that",
+        }
+        name_pattern = r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b"
+        for match in re.finditer(name_pattern, text):
+            candidate = match.group(1).strip()
+            first_word = candidate.split()[0].lower()
+            if first_word not in stopwords and len(candidate) > 2:
+                recent.append((match.start(), candidate))
+
+    recent.sort(key=lambda x: x[0], reverse=True)
+    seen: set[str] = set()
+    result: list[str] = []
+    for _, name in recent:
+        norm = name.strip()
+        if norm.lower() not in seen:
+            seen.add(norm.lower())
+            result.append(norm)
+            if len(result) >= limit:
+                break
+    return result
+
+
 def build_memory_block(
     story_id: int,
     chapter_index: int,
@@ -90,9 +173,8 @@ def build_memory_block(
 ) -> str:
     """Build a compact memory block for the LLM prompt.
 
-    Chapter 1 starts with an empty memory block.
-    For later chapters, lists all canonical characters/aliases, plus top facts for
-    characters appearing in this chapter, capped by max_tokens.
+    Lists all canonical characters/aliases, recently mentioned character pronoun hints,
+    plus top facts for characters appearing in this chapter, capped by max_tokens.
     """
     from qifrey.db.models import Character, Fact
 
@@ -103,18 +185,34 @@ def build_memory_block(
         .all()
     )
 
-    if not characters:
-        return ""
+    recent_names = find_recently_mentioned_characters(text, characters, limit=2)
+    recent_hint_section = ""
+    if recent_names:
+        recent_hint_section = (
+            "### RECENTLY MENTIONED CHARACTERS (Pronoun Resolution Hint):\n"
+            "The following character(s) were mentioned in the immediate narrative context:\n"
+            + "\n".join(f"- {name}" for name in recent_names)
+            + "\nWhen narrative sentences use third-person pronouns ('he', 'his', 'him', "
+            "'she', 'her', 'they') that clearly refer to this character, attribute facts directly "
+            "to their canonical name. Never attribute facts to pronouns like 'he' or 'his'. "
+            "The evidence_quote must still be verbatim."
+        )
 
     manual_or_planned = [c for c in characters if c.source == "manual" or c.status == "planned"]
     if chapter_index <= 1 and not manual_or_planned:
-        return ""
+        return recent_hint_section
+
+    if not characters:
+        return recent_hint_section
 
     appearing_characters = scan_known_characters(text, characters)
 
-    lines: list[str] = [
-        "### KNOWN CHARACTERS & MEMORY (Reuse canonical names when aliases appear):"
-    ]
+    lines: list[str] = []
+    if recent_hint_section:
+        lines.append(recent_hint_section)
+        lines.append("")
+
+    lines.append("### KNOWN CHARACTERS & MEMORY (Reuse canonical names when aliases appear):")
 
     # 1. Roster of all characters and known aliases
     lines.append("ROSTER:")

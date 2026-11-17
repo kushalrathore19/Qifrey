@@ -20,6 +20,11 @@ from qifrey.pipeline.schemas import (
 logger = logging.getLogger(__name__)
 
 
+PRONOUNS: frozenset[str] = frozenset(
+    {"he", "him", "his", "she", "her", "hers", "they", "them", "their", "theirs", "it", "its"}
+)
+
+
 def quote_match_ratio(quote: str, text: str) -> float:
     """Calculate the best match ratio (0.0 to 1.0) of a quote against the text."""
     clean_quote = " ".join(quote.strip().lower().split())
@@ -81,6 +86,7 @@ def validate_extraction(
     min_confidence: float = 0.5,
     confidence_threshold: float | None = None,
     ignored_names: set[str] | None = None,
+    recent_characters: list[str] | None = None,
 ) -> ValidationResult:
     """Validate extracted items against chapter text, confidence threshold, and duplicate checks.
 
@@ -198,6 +204,24 @@ def validate_extraction(
     accepted_facts: list[FactExtraction] = []
     seen_facts: set[tuple[str, str, str]] = set()
     for fact in parsed.facts:
+        # Pronoun resolution check
+        if fact.character.strip().lower() in PRONOUNS:
+            if recent_characters and len(recent_characters) == 1:
+                fact.character = recent_characters[0]
+            elif len(accepted_chars) == 1:
+                fact.character = accepted_chars[0].name
+            else:
+                rejections.append(
+                    {
+                        "item_type": "fact",
+                        "item": f"{fact.character}: {fact.attribute}={fact.value}",
+                        "reason": (
+                            f"Cannot attribute fact to bare pronoun '{fact.character}' "
+                            "without unambiguous referent"
+                        ),
+                    }
+                )
+                continue
         # Confidence check
         if fact.confidence < min_confidence:
             rejections.append(

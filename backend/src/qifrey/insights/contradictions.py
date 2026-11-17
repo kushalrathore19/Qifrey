@@ -128,9 +128,14 @@ def detect_contradictions(
     story_id: int,
     db: Session,
     *,
+    chapter_id: int | None = None,
     llm_client: LLMClient | None = None,
 ) -> list[Issue]:
-    """Detect fact contradictions across the story graph and create open Issues."""
+    """Detect fact contradictions across the story graph and create open Issues.
+
+    Supports detecting contradictions within the same chapter as well as across chapters.
+    If chapter_id is provided, only pairs involving facts from that chapter are evaluated.
+    """
     client = llm_client or get_llm_client()
 
     # Fetch attribute rules for this story
@@ -184,6 +189,14 @@ def detect_contradictions(
             for j in range(i + 1, len(char_facts)):
                 f1 = char_facts[i]
                 f2 = char_facts[j]
+
+                # If chapter_id specified, only inspect pairs involving this chapter
+                if (
+                    chapter_id is not None
+                    and f1.chapter_id != chapter_id
+                    and f2.chapter_id != chapter_id
+                ):
+                    continue
 
                 # If rule_mode == "can_change", only flag if two values appear in the same chapter
                 if rule_mode == "can_change" and (

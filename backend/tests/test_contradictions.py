@@ -223,3 +223,127 @@ def test_dismissed_issues_do_not_return_after_reanalysis(client: Any) -> None:
         all_issues = db.query(Issue).filter(Issue.story_id == story.id).all()
         assert len(all_issues) == 1
         assert all_issues[0].status == "dismissed"
+
+
+def test_same_chapter_pronoun_contradiction_regression(client: Any) -> None:
+    """Regression test for Step 0: pronoun-only line resolved to recent character.
+
+    Text: 'Hildred Castaigne adjusted his dark blue overcoat...
+    his black eyes gpt blurry'
+    Detects contradiction within Chapter 1 between 'dark blue' and 'black' eyes.
+    """
+    from qifrey.db.session import get_engine
+    from qifrey.pipeline.context_builder import (
+        build_memory_block,
+        find_recently_mentioned_characters,
+    )
+    from qifrey.pipeline.validator import validate_extraction
+
+    p1 = (
+        "Hildred Castaigne adjusted his dark blue overcoat; "
+        "his dark blue eyes stared into the glass."
+    )
+    p2 = "his black eyes gpt blurry"
+    exact_text = f"{p1}\n\n{p2}"
+
+    with Session(get_engine()) as db:
+        story = Story(title="The Repairer of Reputations")
+        db.add(story)
+        db.flush()
+
+        ch1 = Chapter(
+            story_id=story.id,
+            index=1,
+            title="Chapter 1",
+            text=exact_text,
+            content_hash="h_exact",
+        )
+        db.add(ch1)
+        db.flush()
+
+        # 1. Test recent characters detection
+        recent = find_recently_mentioned_characters(exact_text)
+        assert "Hildred Castaigne" in recent
+
+        # 2. Test memory block contains pronoun hint
+        memory = build_memory_block(story.id, ch1.index, exact_text, db)
+        assert "Hildred Castaigne" in memory
+        assert "RECENTLY MENTIONED CHARACTERS" in memory
+
+        # 3. Test extraction validation with pronoun attribution
+        raw_extraction = {
+            "characters": [
+                {
+                    "name": "Hildred Castaigne",
+                    "aliases": [],
+                    "description": "Protagonist",
+                    "evidence_quote": "Hildred Castaigne adjusted his dark blue overcoat",
+                }
+            ],
+            "locations": [],
+            "facts": [
+                {
+                    "character": "Hildred Castaigne",
+                    "attribute": "eye_color",
+                    "value": "dark blue",
+                    "evidence_quote": "his dark blue eyes stared into the glass",
+                    "confidence": 1.0,
+                },
+                # Second fact extracted with pronoun 'his' or resolved to Hildred Castaigne
+                {
+                    "character": "his",
+                    "attribute": "eye_color",
+                    "value": "black",
+                    "evidence_quote": "his black eyes gpt blurry",
+                    "confidence": 1.0,
+                },
+            ],
+            "relationships": [],
+        }
+
+        val_result = validate_extraction(
+            raw_extraction,
+            exact_text,
+            recent_characters=recent,
+        )
+        assert len(val_result.accepted_facts) == 2
+        # Pronoun 'his' was resolved to 'Hildred Castaigne'
+        assert all(f.character == "Hildred Castaigne" for f in val_result.accepted_facts)
+
+        # 4. Insert facts into graph
+        char = Character(story_id=story.id, canonical_name="Hildred Castaigne")
+        db.add(char)
+        db.flush()
+
+        for f in val_result.accepted_facts:
+            db_fact = Fact(
+                story_id=story.id,
+                character_id=char.id,
+                attribute=f.attribute,
+                value=f.value,
+                chapter_id=ch1.id,
+                quote=f.evidence_quote,
+                confidence=f.confidence,
+            )
+            db.add(db_fact)
+        db.commit()
+
+        # 5. Detect contradictions in Chapter 1
+        fake_llm = FakeLLMClient(
+            responses=[
+                AdjudicationOutput(
+                    verdict="contradiction",
+                    explanation="Eyes cannot be dark blue and black in the same scene.",
+                    severity="error",
+                )
+            ]
+        )
+
+        issues = detect_contradictions(story.id, db, chapter_id=ch1.id, llm_client=fake_llm)
+        assert len(issues) == 1
+        assert issues[0].type == "contradiction"
+        assert issues[0].chapter_id == ch1.id
+        assert "dark blue" in issues[0].message
+        assert "black" in issues[0].message
+        assert "his dark blue eyes stared into the glass" in issues[0].quote
+        assert "his black eyes gpt blurry" in issues[0].quote

@@ -11,6 +11,7 @@ Your task is to read a chapter from a story manuscript and extract a precise, st
    - `vehicle_color`, `vehicle_type`, `weapon`, `pet`, `voice`, `personality`, `skill`, `affiliation`
    - If an attribute does not fit the above, format it as `other:<snake_case>` (e.g., `other:favorite_drink`).
 5. **Confidence**: Assign confidence from 0.0 to 1.0. High confidence (0.9-1.0) for clear facts directly asserted by the narrator or verified actions; lower confidence for rumors, uncertain guesses, or ambiguous dialogue. Extractions with confidence < 0.5 will be dropped.
+6. **Pronoun Resolution**: When a sentence uses a third-person pronoun (e.g. "his black eyes", "her dark hair", "he was thirty years old") and refers unambiguously to a recently mentioned character (see RECENTLY MENTIONED CHARACTERS or the immediately preceding sentence), attribute the fact directly to that character's canonical name. NEVER create a character named "he", "his", "she", or other pronouns. Always preserve the exact verbatim evidence quote.
 
 ## OUTPUT FORMAT
 Output ONLY a JSON object conforming strictly to the requested ExtractionOutput schema:
