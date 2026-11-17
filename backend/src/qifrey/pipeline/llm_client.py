@@ -15,7 +15,7 @@ from pydantic import BaseModel, ValidationError
 from qifrey.config import get_settings
 from qifrey.db.models import LLMCall
 from qifrey.db.session import get_session_factory
-from qifrey.pipeline.rate_limiter import get_rate_limiter
+from qifrey.pipeline.rate_limiter import get_rate_limiter, is_503_error
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +214,8 @@ class GeminiClient(LLMClient):
         self,
         api_key: str | None = None,
         model: str | None = None,
-        max_retries: int = 5,
+        fallback_model: str | None = None,
+        max_retries: int = 6,
     ) -> None:
         from google import genai
 
@@ -227,6 +228,7 @@ class GeminiClient(LLMClient):
             else "gemini-2.5-flash"
         )
         self.model = model or default_model
+        self.fallback_model = fallback_model or settings.llm_fallback_model
         self.max_retries = max_retries
         self.client = genai.Client(api_key=self.api_key)
 
@@ -237,38 +239,56 @@ class GeminiClient(LLMClient):
         *,
         story_id: int | None = None,
         purpose: str = "",
-    ) -> tuple[str, int, int, int]:
-        """Perform raw Gemini API call wrapped in rate limiter and retry."""
+    ) -> tuple[str, int, int, int, str]:
+        """Perform raw Gemini API call wrapped in rate limiter and retry with fallback support."""
         from google.genai import types
 
-        def _do_call() -> tuple[str, int, int, int]:
-            start = time.perf_counter()
-            config = types.GenerateContentConfig(
-                system_instruction=system,
-                response_mime_type="application/json",
-                temperature=0.0,
-            )
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=user,
-                config=config,
-            )
-            latency_ms = int((time.perf_counter() - start) * 1000)
-            text = response.text or ""
-            in_tokens = 0
-            out_tokens = 0
-            if response.usage_metadata:
-                in_tokens = response.usage_metadata.prompt_token_count or 0
-                out_tokens = response.usage_metadata.candidates_token_count or 0
-            return text, in_tokens, out_tokens, latency_ms
-
         rate_limiter = get_rate_limiter()
-        return rate_limiter.execute_with_retry(
-            _do_call,
-            story_id=story_id,
-            purpose=purpose,
-            max_retries=self.max_retries,
-        )
+
+        def _call_single_model(target_model: str) -> tuple[str, int, int, int]:
+            def _do_call() -> tuple[str, int, int, int]:
+                start = time.perf_counter()
+                config = types.GenerateContentConfig(
+                    system_instruction=system,
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                )
+                response = self.client.models.generate_content(
+                    model=target_model,
+                    contents=user,
+                    config=config,
+                )
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                text = response.text or ""
+                in_tokens = 0
+                out_tokens = 0
+                if response.usage_metadata:
+                    in_tokens = response.usage_metadata.prompt_token_count or 0
+                    out_tokens = response.usage_metadata.candidates_token_count or 0
+                return text, in_tokens, out_tokens, latency_ms
+
+            return rate_limiter.execute_with_retry(
+                _do_call,
+                story_id=story_id,
+                purpose=f"{purpose} [{target_model}]" if purpose else target_model,
+                max_retries=self.max_retries,
+            )
+
+        try:
+            text, in_tokens, out_tokens, latency_ms = _call_single_model(self.model)
+            return text, in_tokens, out_tokens, latency_ms, self.model
+        except Exception as exc:
+            if self.fallback_model and self.fallback_model != self.model and is_503_error(exc):
+                logger.warning(
+                    "Primary model %s failed with 503 after %d attempts. "
+                    "Trying fallback model %s...",
+                    self.model,
+                    self.max_retries,
+                    self.fallback_model,
+                )
+                text, in_tokens, out_tokens, latency_ms = _call_single_model(self.fallback_model)
+                return text, in_tokens, out_tokens, latency_ms, self.fallback_model
+            raise
 
     def complete_json(
         self,
@@ -288,7 +308,7 @@ class GeminiClient(LLMClient):
         )
 
         prompt_hash = _compute_prompt_hash(system_with_schema, user)
-        raw_text, in_tokens, out_tokens, latency_ms = self._call_raw(
+        raw_text, in_tokens, out_tokens, latency_ms, actual_model = self._call_raw(
             system_with_schema,
             user,
             story_id=story_id,
@@ -298,7 +318,7 @@ class GeminiClient(LLMClient):
         _record_llm_call(
             story_id=story_id,
             purpose=purpose,
-            model=self.model,
+            model=actual_model,
             prompt_hash=prompt_hash,
             input_tokens=in_tokens,
             output_tokens=out_tokens,
@@ -321,7 +341,7 @@ class GeminiClient(LLMClient):
                 f"Please fix and output ONLY the corrected JSON object conforming to the schema."
             )
             repair_hash = _compute_prompt_hash(system_with_schema, repair_user)
-            repaired_text, r_in, r_out, r_latency = self._call_raw(
+            repaired_text, r_in, r_out, r_latency, repair_model = self._call_raw(
                 system_with_schema,
                 repair_user,
                 story_id=story_id,
@@ -330,7 +350,7 @@ class GeminiClient(LLMClient):
             _record_llm_call(
                 story_id=story_id,
                 purpose=f"{purpose}_repair",
-                model=self.model,
+                model=repair_model,
                 prompt_hash=repair_hash,
                 input_tokens=r_in,
                 output_tokens=r_out,
@@ -437,6 +457,7 @@ def get_llm_client() -> LLMClient:
         _active_llm_client = GeminiClient(
             api_key=settings.gemini_api_key,
             model=default_model,
+            fallback_model=settings.llm_fallback_model,
         )
     elif provider == "anthropic":
         _active_llm_client = AnthropicClient(

@@ -107,7 +107,9 @@ export const StoryProfile: React.FC = () => {
     enabled: !isNaN(storyId),
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status === "running" || status === "waiting on rate limit"
+      return status === "running" ||
+        status === "waiting on rate limit" ||
+        status === "waiting on provider"
         ? 1500
         : false;
     },
@@ -227,6 +229,7 @@ export const StoryProfile: React.FC = () => {
   const isAnalyzing =
     analysisStatus?.status === "running" ||
     analysisStatus?.status === "waiting on rate limit" ||
+    analysisStatus?.status === "waiting on provider" ||
     analyzeMutation.isPending;
 
   if (isNaN(storyId)) {
@@ -276,6 +279,13 @@ export const StoryProfile: React.FC = () => {
             <div className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-amber-100 dark:bg-amber-950/80 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-semibold animate-pulse">
               <Clock className="w-3.5 h-3.5 text-amber-700 animate-spin" />
               <span>Waiting on rate limit (cooling down)...</span>
+            </div>
+          )}
+
+          {analysisStatus && analysisStatus.status === "waiting on provider" && (
+            <div className="flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-amber-100 dark:bg-amber-950/80 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-semibold animate-pulse">
+              <Clock className="w-3.5 h-3.5 text-amber-700 animate-spin" />
+              <span>Waiting on provider (retrying)...</span>
             </div>
           )}
 

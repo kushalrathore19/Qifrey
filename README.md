@@ -59,6 +59,7 @@ Copy `.env.example` in `backend/` or set the following in your environment:
 # LLM Provider & Credentials
 QIFREY_LLM_PROVIDER=gemini        # 'gemini' | 'anthropic' | 'fake'
 QIFREY_LLM_MODEL=gemini-2.5-flash # or 'claude-sonnet-4-20250514'
+QIFREY_LLM_FALLBACK_MODEL=gemini-1.5-flash # optional fallback if primary returns 503
 QIFREY_LLM_MAX_RPM=10             # Rate limit throttle: max requests per minute
 
 # Provider API Keys (set the key for your provider)

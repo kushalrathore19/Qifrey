@@ -36,12 +36,19 @@ logger = logging.getLogger(__name__)
 _ANALYSIS_PROGRESS: dict[int, dict[str, Any]] = {}
 
 
-def set_story_rate_limit_status(story_id: int | None, waiting: bool) -> None:
-    """Callback invoked by RateLimiter to update live analysis progress during 429 backoff."""
+def set_story_rate_limit_status(
+    story_id: int | None, status_or_waiting: str | bool | None
+) -> None:
+    """Callback invoked by RateLimiter to update live analysis progress during backoff."""
     if story_id is not None and story_id in _ANALYSIS_PROGRESS:
-        if waiting:
+        if isinstance(status_or_waiting, str):
+            _ANALYSIS_PROGRESS[story_id]["status"] = status_or_waiting
+        elif status_or_waiting is True:
             _ANALYSIS_PROGRESS[story_id]["status"] = "waiting on rate limit"
-        elif _ANALYSIS_PROGRESS[story_id]["status"] == "waiting on rate limit":
+        elif _ANALYSIS_PROGRESS[story_id]["status"] in (
+            "waiting on rate limit",
+            "waiting on provider",
+        ):
             _ANALYSIS_PROGRESS[story_id]["status"] = "running"
 
 

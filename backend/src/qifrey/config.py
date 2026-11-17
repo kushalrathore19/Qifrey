@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     db_path: str = "qifrey.db"
     llm_provider: str = "anthropic"  # anthropic | gemini | fake
     llm_model: str = "claude-sonnet-4-20250514"
+    llm_fallback_model: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("QIFREY_LLM_FALLBACK_MODEL", "LLM_FALLBACK_MODEL"),
+    )
     anthropic_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("ANTHROPIC_API_KEY", "QIFREY_ANTHROPIC_API_KEY"),

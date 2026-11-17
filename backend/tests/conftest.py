@@ -15,12 +15,14 @@ from qifrey.config import get_settings
 from qifrey.db.models import Base
 from qifrey.db.session import get_db, get_engine, reset_engine
 from qifrey.main import app
+from qifrey.pipeline.rate_limiter import reset_rate_limiter
 
 
 @pytest.fixture(autouse=True)
 def _reset_db():
     """Create a fresh in-memory DB for every test."""
     reset_engine()
+    reset_rate_limiter(max_rpm=1000)
     get_settings.cache_clear()
     # Override db_path for tests
     os.environ["QIFREY_DB_PATH"] = ":memory:"

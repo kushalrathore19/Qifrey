@@ -164,7 +164,13 @@ export interface GrammarIssue {
 
 export interface AnalysisStatus {
   story_id: number;
-  status: "idle" | "running" | "waiting on rate limit" | "completed" | "failed";
+  status:
+    | "idle"
+    | "running"
+    | "waiting on rate limit"
+    | "waiting on provider"
+    | "completed"
+    | "failed";
   current_chapter: number;
   total_chapters: number;
   error: string | null;

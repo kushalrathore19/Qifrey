@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 from pydantic import BaseModel, Field
@@ -23,6 +23,8 @@ from qifrey.pipeline.llm_client import (
 )
 from qifrey.pipeline.rate_limiter import (
     RateLimiter,
+    is_503_error,
+    is_provider_error,
     is_rate_limit_error,
     register_rate_limit_listener,
 )
@@ -236,3 +238,248 @@ def test_provider_config_selection() -> None:
         assert isinstance(client, FakeLLMClient)
 
     set_llm_client(None)
+
+
+def test_is_503_and_provider_error() -> None:
+    """Detects HTTP 503, UNAVAILABLE, HTTP 500, and INTERNAL errors."""
+
+    class Custom503Error(Exception):
+        status_code = 503
+
+    class CustomUnavailableError(Exception):
+        code = "UNAVAILABLE"
+
+    class Custom500Error(Exception):
+        status_code = 500
+
+    class CustomInternalError(Exception):
+        code = "INTERNAL"
+
+    assert is_503_error(Custom503Error("Service unavailable")) is True
+    assert is_503_error(CustomUnavailableError("Unavailable")) is True
+    assert is_503_error(Exception("503 Service Unavailable")) is True
+    assert is_503_error(Exception("The service is UNAVAILABLE")) is True
+    assert is_503_error(Custom500Error("Internal")) is False
+    assert is_503_error(ValueError("Invalid")) is False
+
+    assert is_provider_error(Custom503Error("Service unavailable")) is True
+    assert is_provider_error(CustomUnavailableError("Unavailable")) is True
+    assert is_provider_error(Custom500Error("Internal Server Error")) is True
+    assert is_provider_error(CustomInternalError("Internal error")) is True
+    assert is_provider_error(Exception("500 Internal Server Error")) is True
+    assert is_provider_error(ValueError("Invalid input")) is False
+
+
+def test_fake_client_raises_503_twice_then_succeeds() -> None:
+    """Fake client raising 503 twice retries and sets 'waiting on provider'."""
+    status_events: list[tuple[int | None, str | bool | None]] = []
+
+    def status_listener(story_id: int | None, status: str | bool | None) -> None:
+        status_events.append((story_id, status))
+
+    register_rate_limit_listener(status_listener)
+
+    limiter = RateLimiter(max_rpm=60)
+    attempts = 0
+
+    class MockUnavailableError(Exception):
+        status_code = 503
+
+    def fake_503_func() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise MockUnavailableError("503 Service Unavailable (overloaded)")
+        return "success_after_503"
+
+    _ANALYSIS_PROGRESS[777] = {
+        "story_id": 777,
+        "status": "running",
+        "current_chapter": 1,
+        "total_chapters": 2,
+        "error": None,
+    }
+
+    result = limiter.execute_with_retry(
+        fake_503_func,
+        story_id=777,
+        purpose="fake_503_test",
+        max_retries=6,
+        initial_backoff=0.01,
+        max_backoff=0.1,
+    )
+
+    assert result == "success_after_503"
+    assert attempts == 3
+
+    # Check status transitions: "waiting on provider" was signaled and cleared
+    assert (777, "waiting on provider") in status_events
+    assert (777, False) in status_events
+    assert _ANALYSIS_PROGRESS[777]["status"] == "running"
+
+
+def test_gemini_client_retry_503_twice_then_succeeds(db_session: Session) -> None:
+    """GeminiClient retries on HTTP 503 twice then succeeds and records primary model."""
+    mock_genai = MagicMock()
+    mock_client = MagicMock()
+    mock_genai.Client.return_value = mock_client
+
+    class ServiceUnavailable503Error(Exception):
+        status_code = 503
+
+    mock_resp = MagicMock()
+    mock_resp.text = '{"name": "Ford Prefect", "score": 99}'
+    mock_resp.usage_metadata.prompt_token_count = 25
+    mock_resp.usage_metadata.candidates_token_count = 15
+
+    # Fails twice with 503, succeeds on third attempt
+    mock_client.models.generate_content.side_effect = [
+        ServiceUnavailable503Error("503 UNAVAILABLE"),
+        ServiceUnavailable503Error("503 UNAVAILABLE"),
+        mock_resp,
+    ]
+
+    story = Story(title="Gemini 503 Story")
+    db_session.add(story)
+    db_session.commit()
+
+    _ANALYSIS_PROGRESS[story.id] = {
+        "story_id": story.id,
+        "status": "running",
+        "current_chapter": 1,
+        "total_chapters": 1,
+        "error": None,
+    }
+
+    with patch.dict(
+        "sys.modules",
+        {"google": MagicMock(), "google.genai": mock_genai, "google.genai.types": MagicMock()},
+    ):
+        client = GeminiClient(
+            api_key="fake-gemini-key",
+            model="gemini-2.5-flash",
+            max_retries=6,
+        )
+        client.client = mock_client
+
+        # Mock rate limiter backoff sleep to be instantaneous
+        with patch("qifrey.pipeline.rate_limiter.time.sleep", return_value=None):
+            result = client.complete_json(
+                system="You are an extractor.",
+                user="Extract Ford Prefect",
+                schema=DummyTestSchema,
+                story_id=story.id,
+                purpose="test_503_retry",
+            )
+
+        assert isinstance(result, DummyTestSchema)
+        assert result.name == "Ford Prefect"
+        assert result.score == 99
+        assert mock_client.models.generate_content.call_count == 3
+
+        # Verify call logged to LLMCall table with primary model
+        calls = db_session.query(LLMCall).filter(LLMCall.story_id == story.id).all()
+        assert len(calls) == 1
+        assert calls[0].model == "gemini-2.5-flash"
+        assert calls[0].purpose == "test_503_retry"
+
+
+def test_gemini_client_fallback_model_on_exhausted_503(db_session: Session) -> None:
+    """When primary model exhausts retries on 503, GeminiClient uses QIFREY_LLM_FALLBACK_MODEL."""
+    mock_genai = MagicMock()
+    mock_client = MagicMock()
+    mock_genai.Client.return_value = mock_client
+
+    class ServiceUnavailable503Error(Exception):
+        status_code = 503
+
+    def generate_content_mock(model: str, contents: str, config: Any) -> Any:
+        if model == "gemini-2.5-flash":
+            # Primary model persistently unavailable
+            raise ServiceUnavailable503Error("503 UNAVAILABLE on primary")
+        # Fallback model succeeds
+        mock_resp = MagicMock()
+        mock_resp.text = '{"name": "Trillian Astra", "score": 88}'
+        mock_resp.usage_metadata.prompt_token_count = 20
+        mock_resp.usage_metadata.candidates_token_count = 12
+        return mock_resp
+
+    mock_client.models.generate_content.side_effect = generate_content_mock
+
+    story = Story(title="Fallback Story")
+    db_session.add(story)
+    db_session.commit()
+
+    with patch.dict(
+        "sys.modules",
+        {"google": MagicMock(), "google.genai": mock_genai, "google.genai.types": MagicMock()},
+    ):
+        client = GeminiClient(
+            api_key="fake-gemini-key",
+            model="gemini-2.5-flash",
+            fallback_model="gemini-1.5-flash",
+            max_retries=3,
+        )
+        client.client = mock_client
+
+        with patch("qifrey.pipeline.rate_limiter.time.sleep", return_value=None):
+            result = client.complete_json(
+                system="Extract system",
+                user="Extract Trillian Astra",
+                schema=DummyTestSchema,
+                story_id=story.id,
+                purpose="test_fallback",
+            )
+
+        assert isinstance(result, DummyTestSchema)
+        assert result.name == "Trillian Astra"
+        assert result.score == 88
+
+        # Verify LLMCall records fallback model as the model that actually succeeded
+        calls = db_session.query(LLMCall).filter(LLMCall.story_id == story.id).all()
+        assert len(calls) == 1
+        assert calls[0].model == "gemini-1.5-flash"
+        assert calls[0].purpose == "test_fallback"
+
+
+def test_gemini_client_retry_500_internal_error(db_session: Session) -> None:
+    """GeminiClient retries on HTTP 500 / INTERNAL errors."""
+    mock_genai = MagicMock()
+    mock_client = MagicMock()
+    mock_genai.Client.return_value = mock_client
+
+    class InternalServerError500Error(Exception):
+        status_code = 500
+
+    mock_resp = MagicMock()
+    mock_resp.text = '{"name": "Zaphod Beeblebrox", "score": 100}'
+    mock_resp.usage_metadata.prompt_token_count = 30
+    mock_resp.usage_metadata.candidates_token_count = 20
+
+    mock_client.models.generate_content.side_effect = [
+        InternalServerError500Error("500 Internal Server Error"),
+        mock_resp,
+    ]
+
+    story = Story(title="Gemini 500 Story")
+    db_session.add(story)
+    db_session.commit()
+
+    with patch.dict(
+        "sys.modules",
+        {"google": MagicMock(), "google.genai": mock_genai, "google.genai.types": MagicMock()},
+    ):
+        client = GeminiClient(api_key="fake-gemini-key", model="gemini-2.5-flash", max_retries=4)
+        client.client = mock_client
+
+        with patch("qifrey.pipeline.rate_limiter.time.sleep", return_value=None):
+            result = client.complete_json(
+                system="Extract system",
+                user="Extract Zaphod Beeblebrox",
+                schema=DummyTestSchema,
+                story_id=story.id,
+                purpose="test_500_retry",
+            )
+
+        assert result.name == "Zaphod Beeblebrox"
+        assert mock_client.models.generate_content.call_count == 2

@@ -18,42 +18,79 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# Status callback: (story_id, is_waiting) -> None
-_STATUS_LISTENERS: list[Callable[[int | None, bool], None]] = []
+# Status callback: (story_id, status_or_waiting) -> None
+_STATUS_LISTENERS: list[Callable[[int | None, str | bool | None], None]] = []
 
 
-def register_rate_limit_listener(listener: Callable[[int | None, bool], None]) -> None:
-    """Register a callback invoked when entering or leaving rate limit waits."""
+def register_rate_limit_listener(
+    listener: Callable[[int | None, str | bool | None], None],
+) -> None:
+    """Register a callback invoked when entering or leaving rate limit or provider waits."""
     if listener not in _STATUS_LISTENERS:
         _STATUS_LISTENERS.append(listener)
 
 
-def notify_rate_limit_status(story_id: int | None, is_waiting: bool) -> None:
-    """Notify all registered listeners about rate limit status changes."""
+def notify_rate_limit_status(story_id: int | None, status_or_waiting: str | bool | None) -> None:
+    """Notify all registered listeners about rate limit and provider status changes."""
     for listener in _STATUS_LISTENERS:
         try:
-            listener(story_id, is_waiting)
+            listener(story_id, status_or_waiting)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Error in rate limit listener: %s", exc)
 
 
 def is_rate_limit_error(exc: Exception) -> bool:
     """Check if an exception represents an HTTP 429 or quota exhaustion."""
-    # Check status code attributes
-    for attr in ("status_code", "code", "http_status"):
-        val = getattr(exc, attr, None)
-        if val in (429, "429", "RESOURCE_EXHAUSTED"):
-            return True
+    target = getattr(exc, "__cause__", None) or exc
+    for e in (exc, target):
+        for attr in ("status_code", "code", "http_status"):
+            val = getattr(e, attr, None)
+            if val in (429, "429", "RESOURCE_EXHAUSTED"):
+                return True
 
-    err_str = str(exc).lower()
-    return (
-        "429" in err_str
-        or "resource_exhausted" in err_str
-        or "resource exhausted" in err_str
-        or "rate limit" in err_str
-        or "quota exceeded" in err_str
-        or "too many requests" in err_str
-    )
+        err_str = str(e).lower()
+        if (
+            "429" in err_str
+            or "resource_exhausted" in err_str
+            or "resource exhausted" in err_str
+            or "rate limit" in err_str
+            or "quota exceeded" in err_str
+            or "too many requests" in err_str
+        ):
+            return True
+    return False
+
+
+def is_503_error(exc: Exception) -> bool:
+    """Check if an exception represents an HTTP 503 or UNAVAILABLE error."""
+    target = getattr(exc, "__cause__", None) or exc
+    for e in (exc, target):
+        for attr in ("status_code", "code", "http_status"):
+            val = getattr(e, attr, None)
+            if val in (503, "503", "UNAVAILABLE"):
+                return True
+
+        err_str = str(e).lower()
+        if "503" in err_str or "unavailable" in err_str or "service unavailable" in err_str:
+            return True
+    return False
+
+
+def is_provider_error(exc: Exception) -> bool:
+    """Check if an exception represents an HTTP 503 (UNAVAILABLE) or 500 (INTERNAL) error."""
+    if is_503_error(exc):
+        return True
+    target = getattr(exc, "__cause__", None) or exc
+    for e in (exc, target):
+        for attr in ("status_code", "code", "http_status"):
+            val = getattr(e, attr, None)
+            if val in (500, "500", "INTERNAL"):
+                return True
+
+        err_str = str(e).lower()
+        if "500" in err_str or "internal server error" in err_str or "internal error" in err_str:
+            return True
+    return False
 
 
 class RateLimiter:
@@ -109,11 +146,14 @@ class RateLimiter:
         *,
         story_id: int | None = None,
         purpose: str = "",
-        max_retries: int = 5,
+        max_retries: int = 6,
         initial_backoff: float = 2.0,
         max_backoff: float = 60.0,
     ) -> T:
-        """Execute callable with throttling and exponential backoff retry for 429 errors."""
+        """Execute callable with throttling and exponential backoff retry.
+
+        Retries on 429, 503, and 500 transient errors.
+        """
         last_err: Exception | None = None
 
         for attempt in range(max_retries):
@@ -122,22 +162,26 @@ class RateLimiter:
                 return func()
             except Exception as exc:
                 last_err = exc
-                if is_rate_limit_error(exc) and attempt < max_retries - 1:
+                is_rl = is_rate_limit_error(exc)
+                is_prov = is_provider_error(exc)
+                if (is_rl or is_prov) and attempt < max_retries - 1:
+                    status_signal: str | bool = True if is_rl else "waiting on provider"
+                    status_log = "waiting on rate limit" if is_rl else "waiting on provider"
                     # Exponential backoff with jitter
                     backoff = min(
                         initial_backoff * (2**attempt) + random.uniform(0.1, 1.0),
                         max_backoff,
                     )
                     logger.warning(
-                        "Rate limit hit (429/RESOURCE_EXHAUSTED) for %s. Retrying in %.2fs "
-                        "(attempt %d/%d): %s",
-                        purpose or "request",
-                        backoff,
+                        "Transient error (%s) on attempt %d/%d for %s. Retrying in %.2fs: %s",
+                        status_log,
                         attempt + 1,
                         max_retries,
+                        purpose or "request",
+                        backoff,
                         exc,
                     )
-                    notify_rate_limit_status(story_id, True)
+                    notify_rate_limit_status(story_id, status_signal)
                     try:
                         time.sleep(backoff)
                     finally:
@@ -157,9 +201,7 @@ class RateLimiter:
                     raise
 
         if last_err is not None:
-            raise RuntimeError(
-                f"LLM request failed after {max_retries} attempts: {last_err}"
-            ) from last_err
+            raise last_err
         raise RuntimeError("LLM request failed with unknown error.")
 
 
