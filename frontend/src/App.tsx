@@ -7,6 +7,7 @@ import { Navbar } from "./components/Navbar";
 import { Library } from "./pages/Library";
 import { StoryProfile } from "./pages/StoryProfile";
 import { Editor } from "./pages/Editor";
+import { StorySettingsPage } from "./pages/StorySettings";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -31,6 +32,7 @@ export const App: React.FC = () => {
                   <Route path="/" element={<Library />} />
                   <Route path="/stories/:id" element={<StoryProfile />} />
                   <Route path="/stories/:id/edit" element={<Editor />} />
+                  <Route path="/stories/:id/settings" element={<StorySettingsPage />} />
                 </Routes>
               </div>
             </div>

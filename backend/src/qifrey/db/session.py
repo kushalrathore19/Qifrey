@@ -42,9 +42,43 @@ def get_session_factory():
     return _SessionLocal
 
 
+def _migrate_columns(engine) -> None:
+    """Lightweight SQLite migration to add missing columns to existing tables."""
+    from sqlalchemy import text  # noqa: PLC0415
+
+    migrations = [
+        ("stories", "settings_json", "TEXT DEFAULT NULL"),
+        ("chapters", "exclude_from_analysis", "BOOLEAN DEFAULT 0"),
+        ("characters", "source", "VARCHAR(20) DEFAULT 'ai'"),
+        ("characters", "locked", "BOOLEAN DEFAULT 0"),
+        ("characters", "status", "VARCHAR(20) DEFAULT 'active'"),
+        ("characters", "notes", "TEXT DEFAULT NULL"),
+        ("characters", "color", "VARCHAR(50) DEFAULT NULL"),
+        ("characters", "tags_json", "TEXT DEFAULT NULL"),
+        ("aliases", "source", "VARCHAR(20) DEFAULT 'ai'"),
+        ("facts", "source", "VARCHAR(20) DEFAULT 'ai'"),
+        ("facts", "locked", "BOOLEAN DEFAULT 0"),
+    ]
+
+    with engine.connect() as conn:
+        for table, column, col_def in migrations:
+            try:
+                # Check if column exists
+                cols = [
+                    row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+                ]
+                if cols and column not in cols:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}"))
+                    conn.commit()
+            except Exception:
+                pass
+
+
 def init_db() -> None:
-    """Create all tables."""
-    Base.metadata.create_all(bind=get_engine())
+    """Create all tables and perform lightweight schema migrations."""
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+    _migrate_columns(engine)
 
 
 def get_db() -> Generator[Session, None, None]:

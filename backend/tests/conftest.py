@@ -45,3 +45,12 @@ def _reset_db():
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(app)
+
+
+@pytest.fixture
+def db_session():
+    from sqlalchemy.orm import Session
+
+    engine = get_engine()
+    with Session(engine) as session:
+        yield session

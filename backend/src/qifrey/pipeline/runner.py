@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from qifrey.db.models import Chapter, Issue, Story
+from qifrey.db.models import Chapter, IgnoredName, Issue, Story
 from qifrey.db.session import get_session_factory
-from qifrey.grammar.checker import check_grammar
+from qifrey.grammar.checker import DEFAULT_DISABLED_RULES, check_grammar
 from qifrey.graph.alias_resolver import resolve_or_create_character
 from qifrey.graph.store import (
     delete_chapter_data,
@@ -62,12 +63,30 @@ def analyze_chapter(
     llm_client: LLMClient | None = None,
 ) -> bool:
     """Analyze a single chapter. Returns True if analyzed, False if skipped."""
+    if chapter.exclude_from_analysis:
+        logger.info("Chapter %d is marked exclude_from_analysis, skipping.", chapter.index)
+        return False
+
     # Incremental check: if content hash matches analyzed hash, skip
     if chapter.analyzed_hash and chapter.analyzed_hash == chapter.content_hash:
         logger.info("Chapter %d is up to date (hash matches), skipping.", chapter.index)
         return False
 
     logger.info("Analyzing Chapter %d: '%s'...", chapter.index, chapter.title)
+
+    # Read story settings and ignored names
+    story = db.query(Story).filter(Story.id == story_id).first()
+    settings: dict[str, Any] = {}
+    if story and story.settings_json:
+        with contextlib.suppress(Exception):
+            settings = json.loads(story.settings_json)
+    confidence_threshold = float(settings.get("confidence_threshold", 0.7))
+    grammar_lang = str(settings.get("grammar_language", "en-US"))
+    disabled_rules_list = settings.get("disabled_grammar_rules", [])
+    effective_disabled_rules = DEFAULT_DISABLED_RULES.union(disabled_rules_list)
+
+    ignored_records = db.query(IgnoredName).filter(IgnoredName.story_id == story_id).all()
+    ignored_names = {r.name for r in ignored_records}
 
     # Delete existing facts/relationships for this chapter
     delete_chapter_data(db, chapter.id)
@@ -104,7 +123,12 @@ def analyze_chapter(
         )
 
         # Validate extraction against this chunk's text
-        val_result = validate_extraction(extraction, chunk)
+        val_result = validate_extraction(
+            extraction,
+            chunk,
+            confidence_threshold=confidence_threshold,
+            ignored_names=ignored_names,
+        )
 
         # 1. Store characters and aliases
         for char_ext in val_result.accepted_characters:
@@ -163,7 +187,11 @@ def analyze_chapter(
         db.commit()
 
     # Run grammar checks for this changed chapter
-    grammar_issues = check_grammar(chapter.text)
+    grammar_issues = check_grammar(
+        chapter.text,
+        language=grammar_lang,
+        disabled_rules=effective_disabled_rules,
+    )
     for g in grammar_issues:
         db.add(
             Issue(

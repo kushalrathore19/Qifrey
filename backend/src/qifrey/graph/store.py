@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
-from qifrey.db.models import Alias, Character, Fact, Location, Relationship
+from qifrey.db.models import Alias, Character, Fact, IgnoredName, Location, Relationship
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -17,34 +18,71 @@ def upsert_character(
     *,
     description: str | None = None,
     aliases: list[str] | None = None,
-) -> Character:
+    source: str = "ai",
+    locked: bool = False,
+    status: str = "active",
+    notes: str | None = None,
+    color: str | None = None,
+    tags: list[str] | None = None,
+) -> Character | None:
     """Find an existing character by canonical name or create a new one."""
+    clean_name = canonical_name.strip()
+
+    # Check if name is in IgnoredName
+    ignored = (
+        db.query(IgnoredName)
+        .filter(
+            IgnoredName.story_id == story_id,
+            IgnoredName.name == clean_name,
+        )
+        .first()
+    )
+    if ignored:
+        return None
+
     char = (
         db.query(Character)
         .filter(
             Character.story_id == story_id,
-            Character.canonical_name == canonical_name.strip(),
+            Character.canonical_name == clean_name,
         )
         .first()
     )
 
+    tags_str = json.dumps(tags) if tags else None
+
     if not char:
         char = Character(
             story_id=story_id,
-            canonical_name=canonical_name.strip(),
+            canonical_name=clean_name,
             description=description,
+            source=source,
+            locked=locked,
+            status=status,
+            notes=notes,
+            color=color,
+            tags_json=tags_str,
         )
         db.add(char)
         db.flush()
-    elif description and not char.description:
-        char.description = description
+    else:
+        # If existing character is planned, transition to active
+        if char.status == "planned":
+            char.status = "active"
+        if not char.locked:
+            if description and not char.description:
+                char.description = description
+            if notes and not char.notes:
+                char.notes = notes
+            if color and not char.color:
+                char.color = color
 
     if aliases:
         existing_aliases = {a.name.strip().lower() for a in char.aliases}
         for alias_name in aliases:
             norm = alias_name.strip().lower()
             if norm and norm != char.canonical_name.lower() and norm not in existing_aliases:
-                db.add(Alias(character_id=char.id, name=alias_name.strip()))
+                db.add(Alias(character_id=char.id, name=alias_name.strip(), source=source))
                 existing_aliases.add(norm)
         db.flush()
 
@@ -82,37 +120,46 @@ def upsert_fact(
     character_id: int,
     attribute: str,
     value: str,
-    chapter_id: int,
+    chapter_id: int | None = None,
     quote: str | None = None,
     confidence: float = 1.0,
+    source: str = "ai",
+    locked: bool = False,
 ) -> Fact:
     """Insert or update a fact for a character."""
-    existing = (
-        db.query(Fact)
-        .filter(
-            Fact.story_id == story_id,
-            Fact.character_id == character_id,
-            Fact.attribute == attribute.strip(),
-            Fact.value == value.strip(),
-            Fact.chapter_id == chapter_id,
-        )
-        .first()
+    clean_attr = attribute.strip()
+    clean_val = value.strip()
+
+    query = db.query(Fact).filter(
+        Fact.story_id == story_id,
+        Fact.character_id == character_id,
+        Fact.attribute == clean_attr,
+        Fact.value == clean_val,
     )
+    if chapter_id is not None:
+        query = query.filter(Fact.chapter_id == chapter_id)
+    else:
+        query = query.filter(Fact.chapter_id.is_(None))
+
+    existing = query.first()
 
     if existing:
-        if quote:
-            existing.quote = quote
-        existing.confidence = max(existing.confidence, confidence)
+        if not existing.locked:
+            if quote:
+                existing.quote = quote
+            existing.confidence = max(existing.confidence, confidence)
         return existing
 
     new_fact = Fact(
         story_id=story_id,
         character_id=character_id,
-        attribute=attribute.strip(),
-        value=value.strip(),
+        attribute=clean_attr,
+        value=clean_val,
         chapter_id=chapter_id,
         quote=quote,
         confidence=confidence,
+        source=source,
+        locked=locked,
     )
     db.add(new_fact)
     db.flush()
@@ -126,7 +173,7 @@ def upsert_relationship(
     source_character_id: int,
     target_character_id: int,
     type_: str,
-    chapter_id: int,
+    chapter_id: int | None = None,
     quote: str | None = None,
 ) -> Relationship:
     """Insert or update a relationship between two characters."""
@@ -161,8 +208,15 @@ def upsert_relationship(
 
 
 def delete_chapter_data(db: Session, chapter_id: int) -> None:
-    """Delete all facts and relationships whose provenance is that chapter."""
-    db.query(Fact).filter(Fact.chapter_id == chapter_id).delete(synchronize_session=False)
+    """Delete AI/unlocked facts and relationships for a chapter.
+
+    Never deletes manual or locked facts.
+    """
+    db.query(Fact).filter(
+        Fact.chapter_id == chapter_id,
+        Fact.source != "manual",
+        Fact.locked.is_(False),
+    ).delete(synchronize_session=False)
     db.query(Relationship).filter(Relationship.chapter_id == chapter_id).delete(
         synchronize_session=False
     )
@@ -201,11 +255,24 @@ def get_character_with_facts(db: Session, character_id: int) -> dict[str, Any] |
         .all()
     )
 
+    tags: list[str] = []
+    if char.tags_json:
+        try:
+            tags = json.loads(char.tags_json)
+        except Exception:
+            tags = []
+
     return {
         "id": char.id,
         "story_id": char.story_id,
         "canonical_name": char.canonical_name,
         "description": char.description,
+        "source": char.source,
+        "locked": char.locked,
+        "status": char.status,
+        "notes": char.notes,
+        "color": char.color,
+        "tags": tags,
         "aliases": [a.name for a in char.aliases],
         "facts": [
             {
@@ -215,6 +282,8 @@ def get_character_with_facts(db: Session, character_id: int) -> dict[str, Any] |
                 "chapter_id": f.chapter_id,
                 "quote": f.quote,
                 "confidence": f.confidence,
+                "source": f.source,
+                "locked": f.locked,
             }
             for f in facts
         ],
@@ -230,3 +299,120 @@ def get_character_with_facts(db: Session, character_id: int) -> dict[str, Any] |
             for r in relationships
         ],
     }
+
+
+def merge_characters(
+    db: Session,
+    story_id: int,
+    source_ids: list[int],
+    target_id: int,
+) -> Character:
+    """Merge source characters into target character. Preserves names as aliases on target."""
+    target = (
+        db.query(Character)
+        .filter(Character.id == target_id, Character.story_id == story_id)
+        .first()
+    )
+    if not target:
+        raise ValueError(f"Target character {target_id} not found")
+
+    existing_aliases = {a.name.strip().lower() for a in target.aliases}
+
+    for s_id in source_ids:
+        if s_id == target_id:
+            continue
+        source = (
+            db.query(Character)
+            .filter(Character.id == s_id, Character.story_id == story_id)
+            .first()
+        )
+        if not source:
+            continue
+
+        # Add source canonical name as an alias of target
+        norm_canonical = source.canonical_name.strip().lower()
+        if (
+            norm_canonical != target.canonical_name.strip().lower()
+            and norm_canonical not in existing_aliases
+        ):
+            db.add(
+                Alias(
+                    character_id=target.id,
+                    name=source.canonical_name.strip(),
+                    source="manual",
+                )
+            )
+            existing_aliases.add(norm_canonical)
+
+        # Move aliases from source to target
+        for a in source.aliases:
+            norm_a = a.name.strip().lower()
+            if norm_a != target.canonical_name.strip().lower() and norm_a not in existing_aliases:
+                db.add(
+                    Alias(
+                        character_id=target.id,
+                        name=a.name.strip(),
+                        source=a.source,
+                    )
+                )
+                existing_aliases.add(norm_a)
+
+        # Move facts from source to target
+        for f in list(source.facts):
+            dup = (
+                db.query(Fact)
+                .filter(
+                    Fact.character_id == target.id,
+                    Fact.attribute == f.attribute,
+                    Fact.value == f.value,
+                    Fact.chapter_id == f.chapter_id,
+                )
+                .first()
+            )
+            if not dup:
+                f.character_id = target.id
+            else:
+                db.delete(f)
+
+        # Move relationships
+        db.query(Relationship).filter(Relationship.source_character_id == source.id).update(
+            {"source_character_id": target.id}, synchronize_session=False
+        )
+        db.query(Relationship).filter(Relationship.target_character_id == source.id).update(
+            {"target_character_id": target.id}, synchronize_session=False
+        )
+
+        db.delete(source)
+
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+def ignore_character(db: Session, character_id: int) -> list[str]:
+    """Delete an AI character and add its canonical name and aliases to IgnoredName."""
+    char = db.query(Character).filter(Character.id == character_id).first()
+    if not char:
+        raise ValueError(f"Character {character_id} not found")
+
+    story_id = char.story_id
+    aliases = db.query(Alias).filter(Alias.character_id == character_id).all()
+    names_to_ignore = [char.canonical_name] + [a.name for a in aliases]
+
+    for name in names_to_ignore:
+        clean = name.strip()
+        if clean:
+            existing = (
+                db.query(IgnoredName)
+                .filter(
+                    IgnoredName.story_id == story_id,
+                    IgnoredName.name == clean,
+                )
+                .first()
+            )
+            if not existing:
+                db.add(IgnoredName(story_id=story_id, name=clean))
+
+    db.delete(char)
+    db.commit()
+    return names_to_ignore

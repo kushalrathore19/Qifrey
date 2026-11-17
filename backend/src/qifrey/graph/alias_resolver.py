@@ -130,34 +130,51 @@ def resolve_or_create_character(
     *,
     description: str | None = None,
     llm_client: LLMClient | None = None,
-) -> Character:
+) -> Character | None:
     """Map a mentioned name to an existing Character or create a new one."""
-    from qifrey.db.models import Alias, Character
+    from qifrey.db.models import Alias, Character, IgnoredName
 
     clean_name = name.strip()
     if not clean_name:
         clean_name = "Unknown"
+
+    # Check if name is ignored
+    ignored = db.query(IgnoredName).filter(IgnoredName.story_id == story_id).all()
+    ignored_set = {i.name.strip().lower() for i in ignored}
+    if clean_name.lower() in ignored_set or strip_honorifics(clean_name).lower() in ignored_set:
+        return None
 
     cache_key = (story_id, clean_name.lower())
     if cache_key in _RESOLUTION_CACHE:
         cached_id = _RESOLUTION_CACHE[cache_key]
         cached_char = db.query(Character).filter(Character.id == cached_id).first()
         if cached_char:
+            if cached_char.status == "planned":
+                cached_char.status = "active"
+                db.flush()
             return cached_char
 
-    # Fetch all existing characters for this story
-    characters = db.query(Character).filter(Character.story_id == story_id).all()
+    # Fetch all existing characters for this story, prioritize manual characters first
+    all_chars = db.query(Character).filter(Character.story_id == story_id).all()
+    manual_chars = [c for c in all_chars if c.source == "manual"]
+    ai_chars = [c for c in all_chars if c.source != "manual"]
+    characters = manual_chars + ai_chars
 
     # 1. Exact or alias match
     match = _match_exact_or_alias(clean_name, characters)
     if match:
+        if match.status == "planned":
+            match.status = "active"
+            db.flush()
         _RESOLUTION_CACHE[cache_key] = match.id
         return match
 
     # 2. Honorific stripping match
     match = _match_honorific_stripped(clean_name, characters)
     if match:
-        # Register the mentioned name as an alias if not already present
+        if match.status == "planned":
+            match.status = "active"
+            db.flush()
         _add_alias_if_missing(db, match, clean_name)
         _RESOLUTION_CACHE[cache_key] = match.id
         return match
@@ -166,6 +183,9 @@ def resolve_or_create_character(
     single_matches = _match_single_name(clean_name, characters)
     if len(single_matches) == 1:
         match = single_matches[0]
+        if match.status == "planned":
+            match.status = "active"
+            db.flush()
         _add_alias_if_missing(db, match, clean_name)
         _RESOLUTION_CACHE[cache_key] = match.id
         return match
@@ -174,6 +194,9 @@ def resolve_or_create_character(
     subset_matches = _match_token_subset(clean_name, characters)
     if len(subset_matches) == 1:
         match = subset_matches[0]
+        if match.status == "planned":
+            match.status = "active"
+            db.flush()
         _add_alias_if_missing(db, match, clean_name)
         _RESOLUTION_CACHE[cache_key] = match.id
         return match
@@ -189,6 +212,9 @@ def resolve_or_create_character(
             llm_client=client,
         )
         if resolved:
+            if resolved.status == "planned":
+                resolved.status = "active"
+                db.flush()
             _add_alias_if_missing(db, resolved, clean_name)
             _RESOLUTION_CACHE[cache_key] = resolved.id
             return resolved

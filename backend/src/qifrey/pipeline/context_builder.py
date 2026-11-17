@@ -76,9 +76,6 @@ def build_memory_block(
     For later chapters, lists all canonical characters/aliases, plus top facts for
     characters appearing in this chapter, capped by max_tokens.
     """
-    if chapter_index <= 1:
-        return ""
-
     from qifrey.db.models import Character, Fact
 
     characters = (
@@ -89,6 +86,10 @@ def build_memory_block(
     )
 
     if not characters:
+        return ""
+
+    manual_or_planned = [c for c in characters if c.source == "manual" or c.status == "planned"]
+    if chapter_index <= 1 and not manual_or_planned:
         return ""
 
     appearing_characters = scan_known_characters(text, characters)
@@ -103,26 +104,35 @@ def build_memory_block(
         aliases_str = ", ".join(
             f'"{a.name}"' for a in char.aliases if a.name != char.canonical_name
         )
-        if aliases_str:
-            lines.append(f"- {char.canonical_name} (aliases: {aliases_str})")
-        else:
-            lines.append(f"- {char.canonical_name}")
+        tag = ""
+        if char.status == "planned":
+            tag = " [Planned]"
+        elif char.source == "manual":
+            tag = " [Author Bible]"
 
-    # 2. Known facts for appearing characters
-    if appearing_characters:
+        if aliases_str:
+            lines.append(f"- {char.canonical_name}{tag} (aliases: {aliases_str})")
+        else:
+            lines.append(f"- {char.canonical_name}{tag}")
+
+    # 2. Known facts for appearing characters or manual/planned characters
+    relevant_characters = set(appearing_characters) | set(manual_or_planned)
+    if relevant_characters:
         lines.append("\nESTABLISHED FACTS FOR CHARACTERS IN THIS CHAPTER:")
-        for char in appearing_characters:
+        for char in sorted(relevant_characters, key=lambda c: c.canonical_name):
             char_facts = (
                 db.query(Fact)
                 .filter(Fact.character_id == char.id)
-                .order_by(Fact.confidence.desc())
+                .order_by(Fact.locked.desc(), Fact.confidence.desc())
                 .limit(8)
                 .all()
             )
             if char_facts:
-                lines.append(f"• {char.canonical_name}:")
+                prefix = f"• {char.canonical_name}:"
+                lines.append(prefix)
                 for f in char_facts:
-                    lines.append(f"   - {f.attribute}: {f.value}")
+                    locked_flag = " [locked]" if f.locked else ""
+                    lines.append(f"   - {f.attribute}: {f.value}{locked_flag}")
 
     raw_block = "\n".join(lines)
 

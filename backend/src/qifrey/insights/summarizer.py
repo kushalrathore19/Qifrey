@@ -87,7 +87,12 @@ def generate_summaries(
     if not story:
         return
 
-    chapters = db.query(Chapter).filter(Chapter.story_id == story_id).order_by(Chapter.index).all()
+    chapters = (
+        db.query(Chapter)
+        .filter(Chapter.story_id == story_id, Chapter.exclude_from_analysis.is_(False))
+        .order_by(Chapter.index)
+        .all()
+    )
     if not chapters:
         return
 

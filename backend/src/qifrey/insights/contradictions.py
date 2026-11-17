@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from qifrey.db.models import Fact, Issue
+from qifrey.db.models import AttributeRule, Fact, Issue
 from qifrey.pipeline.llm_client import LLMClient, get_llm_client
 
 if TYPE_CHECKING:
@@ -88,16 +88,24 @@ def adjudicate_candidate_pair(
         "wound healing), or refer to different things/metaphors."
     )
 
-    ch1_idx = fact1.chapter.index if fact1.chapter else fact1.chapter_id
-    ch2_idx = fact2.chapter.index if fact2.chapter else fact2.chapter_id
+    ch1_label = (
+        f"Chapter {fact1.chapter.index}"
+        if fact1.chapter
+        else (f"Chapter {fact1.chapter_id}" if fact1.chapter_id else "Author Notes")
+    )
+    ch2_label = (
+        f"Chapter {fact2.chapter.index}"
+        if fact2.chapter
+        else (f"Chapter {fact2.chapter_id}" if fact2.chapter_id else "Author Notes")
+    )
 
     user = (
         f"Character: {character_name}\n"
         f"Attribute: {fact1.attribute}\n\n"
-        f"Occurrence 1 (Chapter {ch1_idx}):\n"
+        f"Occurrence 1 ({ch1_label}):\n"
         f"  Value: '{fact1.value}'\n"
         f'  Quote: "{fact1.quote or "No quote"}"\n\n'
-        f"Occurrence 2 (Chapter {ch2_idx}):\n"
+        f"Occurrence 2 ({ch2_label}):\n"
         f"  Value: '{fact2.value}'\n"
         f'  Quote: "{fact2.quote or "No quote"}"\n\n'
         f"Verdict choices:\n"
@@ -124,6 +132,10 @@ def detect_contradictions(
 ) -> list[Issue]:
     """Detect fact contradictions across the story graph and create open Issues."""
     client = llm_client or get_llm_client()
+
+    # Fetch attribute rules for this story
+    rules = db.query(AttributeRule).filter(AttributeRule.story_id == story_id).all()
+    rule_map = {r.attribute.strip().lower(): r.mode for r in rules}
 
     # Query all facts for this story, ordered by character and attribute
     facts = (
@@ -160,6 +172,10 @@ def detect_contradictions(
         if len(char_facts) < 2:
             continue
 
+        rule_mode = rule_map.get(attribute.strip().lower(), "strict")
+        if rule_mode == "ignore":
+            continue
+
         # Check for distinct normalized values
         # Form candidate pairs where normalized values differ
         seen_pairs_in_run: set[tuple[int, int]] = set()
@@ -168,6 +184,14 @@ def detect_contradictions(
             for j in range(i + 1, len(char_facts)):
                 f1 = char_facts[i]
                 f2 = char_facts[j]
+
+                # If rule_mode == "can_change", only flag if two values appear in the same chapter
+                if rule_mode == "can_change" and (
+                    f1.chapter_id is None
+                    or f2.chapter_id is None
+                    or f1.chapter_id != f2.chapter_id
+                ):
+                    continue
 
                 norm1 = normalize_fact_value(f1.value)
                 norm2 = normalize_fact_value(f2.value)
@@ -205,24 +229,52 @@ def detect_contradictions(
                 )
 
                 if decision.verdict == "contradiction":
-                    ch1_idx = f1.chapter.index if f1.chapter else f1.chapter_id
-                    ch2_idx = f2.chapter.index if f2.chapter else f2.chapter_id
-
-                    msg = (
-                        f"Contradiction in {attribute} for {char_name}: "
-                        f"'{f1.value}' (Ch. {ch1_idx}) vs '{f2.value}' (Ch. {ch2_idx}). "
-                        f"{decision.explanation}".strip()
+                    f1_is_manual = f1.source == "manual" or f1.locked
+                    f2_is_manual = f2.source == "manual" or f2.locked
+                    is_notes_conflict = (f1_is_manual and not f2_is_manual) or (
+                        f2_is_manual and not f1_is_manual
                     )
+
+                    ch1_label = (
+                        f"Ch. {f1.chapter.index}"
+                        if f1.chapter
+                        else (f"Ch. {f1.chapter_id}" if f1.chapter_id else "Author Notes")
+                    )
+                    ch2_label = (
+                        f"Ch. {f2.chapter.index}"
+                        if f2.chapter
+                        else (f"Ch. {f2.chapter_id}" if f2.chapter_id else "Author Notes")
+                    )
+
+                    if is_notes_conflict:
+                        manual_f = f1 if f1_is_manual else f2
+                        text_f = f2 if f1_is_manual else f1
+                        text_ch = (
+                            f"Ch. {text_f.chapter.index}"
+                            if text_f.chapter
+                            else (f"Ch. {text_f.chapter_id}" if text_f.chapter_id else "Text")
+                        )
+                        msg = (
+                            f"Text conflicts with your notes: '{text_f.value}' ({text_ch}) vs "
+                            f"'{manual_f.value}' in author notes. {decision.explanation}".strip()
+                        )
+                    else:
+                        msg = (
+                            f"Contradiction in {attribute} for {char_name}: "
+                            f"'{f1.value}' ({ch1_label}) vs '{f2.value}' ({ch2_label}). "
+                            f"{decision.explanation}".strip()
+                        )
 
                     combined_quote = (
-                        f'Ch. {ch1_idx}: "{f1.quote or f1.value}"\n'
-                        f'Ch. {ch2_idx}: "{f2.quote or f2.value}"'
+                        f'{ch1_label}: "{f1.quote or f1.value}"\n'
+                        f'{ch2_label}: "{f2.quote or f2.value}"'
                     )
 
+                    issue_chapter_id = f2.chapter_id or f1.chapter_id
                     issue = Issue(
                         story_id=story_id,
                         type="contradiction",
-                        chapter_id=f2.chapter_id,
+                        chapter_id=issue_chapter_id,
                         severity=decision.severity,
                         message=msg,
                         quote=combined_quote,

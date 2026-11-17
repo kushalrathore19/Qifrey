@@ -12,6 +12,18 @@ class StoryCreate(BaseModel):
     title: str = "Untitled"
 
 
+class StorySettings(BaseModel):
+    confidence_threshold: float = 0.7
+    grammar_language: str = "en-US"
+    disabled_grammar_rules: list[str] = []
+
+
+class StorySettingsUpdate(BaseModel):
+    confidence_threshold: float | None = None
+    grammar_language: str | None = None
+    disabled_grammar_rules: list[str] | None = None
+
+
 class StoryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -29,6 +41,7 @@ class StoryDetail(BaseModel):
     id: int
     title: str
     summary: str | None = None
+    settings_json: str | None = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -44,6 +57,7 @@ class ChapterOut(BaseModel):
     content_hash: str
     analyzed_hash: str | None = None
     summary: str | None = None
+    exclude_from_analysis: bool = False
 
 
 class ChapterBrief(BaseModel):
@@ -56,18 +70,21 @@ class ChapterBrief(BaseModel):
     content_hash: str
     analyzed_hash: str | None = None
     summary: str | None = None
+    exclude_from_analysis: bool = False
 
 
 class ChapterCreate(BaseModel):
     title: str = "New Chapter"
     text: str = ""
     index: int | None = None
+    exclude_from_analysis: bool = False
 
 
 class ChapterUpdate(BaseModel):
     title: str | None = None
     text: str | None = None
     index: int | None = None
+    exclude_from_analysis: bool | None = None
 
 
 class GrammarCheckRequest(BaseModel):
@@ -88,12 +105,33 @@ class MessageOut(BaseModel):
 
 
 class FactDetailOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     attribute: str
     value: str
-    chapter_id: int
+    chapter_id: int | None = None
     quote: str | None = None
     confidence: float = 1.0
+    source: str = "ai"
+    locked: bool = False
+
+
+class FactCreateItem(BaseModel):
+    attribute: str
+    value: str
+    quote: str | None = None
+    chapter_id: int | None = None
+    confidence: float = 1.0
+    locked: bool = False
+
+
+class FactUpdate(BaseModel):
+    attribute: str | None = None
+    value: str | None = None
+    quote: str | None = None
+    confidence: float | None = None
+    locked: bool | None = None
 
 
 class RelationshipDetailOut(BaseModel):
@@ -101,7 +139,7 @@ class RelationshipDetailOut(BaseModel):
     type: str
     source_character_id: int
     target_character_id: int
-    chapter_id: int
+    chapter_id: int | None = None
     quote: str | None = None
 
 
@@ -114,6 +152,12 @@ class CharacterBriefOut(BaseModel):
     description: str | None = None
     aliases: list[str] = []
     fact_count: int = 0
+    source: str = "ai"
+    locked: bool = False
+    status: str = "active"
+    notes: str | None = None
+    color: str | None = None
+    tags: list[str] = []
 
 
 class CharacterDetailOut(BaseModel):
@@ -124,8 +168,69 @@ class CharacterDetailOut(BaseModel):
     canonical_name: str
     description: str | None = None
     aliases: list[str] = []
+    source: str = "ai"
+    locked: bool = False
+    status: str = "active"
+    notes: str | None = None
+    color: str | None = None
+    tags: list[str] = []
     facts: list[FactDetailOut] = []
     relationships: list[RelationshipDetailOut] = []
+
+
+class CharacterCreate(BaseModel):
+    canonical_name: str
+    description: str | None = None
+    aliases: list[str] = []
+    source: str = "manual"
+    locked: bool = False
+    status: str = "active"
+    notes: str | None = None
+    color: str | None = None
+    tags: list[str] = []
+    initial_facts: list[FactCreateItem] = []
+
+
+class CharacterUpdate(BaseModel):
+    canonical_name: str | None = None
+    description: str | None = None
+    status: str | None = None
+    notes: str | None = None
+    color: str | None = None
+    tags: list[str] | None = None
+    locked: bool | None = None
+
+
+class AliasCreate(BaseModel):
+    name: str
+
+
+class AliasOut(BaseModel):
+    id: int
+    character_id: int
+    name: str
+    source: str = "manual"
+
+
+class CharacterMergeRequest(BaseModel):
+    source_ids: list[int]
+    target_id: int
+
+
+class AttributeRuleSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int | None = None
+    attribute: str
+    mode: Literal["strict", "can_change", "ignore"] = "strict"
+
+
+class IgnoredNameOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    story_id: int
+    name: str
 
 
 class AnalysisStatusOut(BaseModel):
@@ -150,7 +255,7 @@ class IssueOut(BaseModel):
     span_end: int | None = None
     suggestions_json: str | None = None
     related_fact_ids_json: str | None = None
-    status: str
+    status: str = "open"
     created_at: datetime.datetime
 
 

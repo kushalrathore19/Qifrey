@@ -79,16 +79,23 @@ def validate_extraction(
     *,
     min_quote_ratio: float = 0.85,
     min_confidence: float = 0.5,
+    confidence_threshold: float | None = None,
+    ignored_names: set[str] | None = None,
 ) -> ValidationResult:
     """Validate extracted items against chapter text, confidence threshold, and duplicate checks.
 
     Rejection criteria:
     (a) Fails schema
     (b) Evidence quote not found in chapter text (ratio < 0.85)
-    (c) Confidence < 0.5
+    (c) Confidence < min_confidence
     (d) Exact duplicate
+    (e) Matches IgnoredName
     """
+    if confidence_threshold is not None:
+        min_confidence = confidence_threshold
+
     rejections: list[dict[str, str]] = []
+    ignored = {n.strip().lower() for n in ignored_names} if ignored_names else set()
 
     # (a) Schema validation
     if isinstance(raw_data, ExtractionOutput):
@@ -117,6 +124,16 @@ def validate_extraction(
                     "item_type": "character",
                     "item": str(char),
                     "reason": "Empty character name",
+                }
+            )
+            continue
+
+        if name_key in ignored:
+            rejections.append(
+                {
+                    "item_type": "character",
+                    "item": char.name,
+                    "reason": f"Character '{char.name}' is on the ignored names list",
                 }
             )
             continue

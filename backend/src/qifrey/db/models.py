@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -18,6 +18,7 @@ class Story(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(500), default="Untitled")
     summary: Mapped[str | None] = mapped_column(Text, default=None)
+    settings_json: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -42,6 +43,12 @@ class Story(Base):
     llm_calls: Mapped[list[LLMCall]] = relationship(
         back_populates="story", cascade="all, delete-orphan"
     )
+    ignored_names: Mapped[list[IgnoredName]] = relationship(
+        back_populates="story", cascade="all, delete-orphan"
+    )
+    attribute_rules: Mapped[list[AttributeRule]] = relationship(
+        back_populates="story", cascade="all, delete-orphan"
+    )
 
 
 class Chapter(Base):
@@ -55,6 +62,7 @@ class Chapter(Base):
     content_hash: Mapped[str] = mapped_column(String(64))
     analyzed_hash: Mapped[str | None] = mapped_column(String(64), default=None)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    exclude_from_analysis: Mapped[bool] = mapped_column(Boolean, default=False)
 
     story: Mapped[Story] = relationship(back_populates="chapters")
     facts: Mapped[list[Fact]] = relationship(back_populates="chapter")
@@ -69,19 +77,29 @@ class Character(Base):
     story_id: Mapped[int] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"))
     canonical_name: Mapped[str] = mapped_column(String(300))
     description: Mapped[str | None] = mapped_column(Text, default=None)
+    source: Mapped[str] = mapped_column(String(20), default="ai")  # ai | manual
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | planned
+    notes: Mapped[str | None] = mapped_column(Text, default=None)
+    color: Mapped[str | None] = mapped_column(String(50), default=None)
+    tags_json: Mapped[str | None] = mapped_column(Text, default=None)
 
     story: Mapped[Story] = relationship(back_populates="characters")
     aliases: Mapped[list[Alias]] = relationship(
         back_populates="character", cascade="all, delete-orphan"
     )
-    facts: Mapped[list[Fact]] = relationship(back_populates="character")
+    facts: Mapped[list[Fact]] = relationship(
+        back_populates="character", cascade="all, delete-orphan"
+    )
     source_relationships: Mapped[list[Relationship]] = relationship(
         back_populates="source_character",
         foreign_keys="Relationship.source_character_id",
+        cascade="all, delete-orphan",
     )
     target_relationships: Mapped[list[Relationship]] = relationship(
         back_populates="target_character",
         foreign_keys="Relationship.target_character_id",
+        cascade="all, delete-orphan",
     )
 
 
@@ -91,6 +109,7 @@ class Alias(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     character_id: Mapped[int] = mapped_column(ForeignKey("characters.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(300))
+    source: Mapped[str] = mapped_column(String(20), default="ai")  # ai | manual
 
     character: Mapped[Character] = relationship(back_populates="aliases")
 
@@ -114,13 +133,17 @@ class Fact(Base):
     character_id: Mapped[int] = mapped_column(ForeignKey("characters.id", ondelete="CASCADE"))
     attribute: Mapped[str] = mapped_column(String(200))
     value: Mapped[str] = mapped_column(Text)
-    chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id", ondelete="CASCADE"))
-    quote: Mapped[str | None] = mapped_column(Text, default=None)
+    chapter_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chapters.id", ondelete="CASCADE"), nullable=True, default=None
+    )
+    quote: Mapped[str | None] = mapped_column(Text, default=None, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    source: Mapped[str] = mapped_column(String(20), default="ai")  # ai | manual
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
 
     story: Mapped[Story] = relationship(back_populates="facts")
     character: Mapped[Character] = relationship(back_populates="facts")
-    chapter: Mapped[Chapter] = relationship(back_populates="facts")
+    chapter: Mapped[Chapter | None] = relationship(back_populates="facts")
 
 
 class Relationship(Base):
@@ -135,7 +158,9 @@ class Relationship(Base):
         ForeignKey("characters.id", ondelete="CASCADE")
     )
     type: Mapped[str] = mapped_column(String(100))
-    chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id", ondelete="CASCADE"))
+    chapter_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chapters.id", ondelete="CASCADE"), nullable=True, default=None
+    )
     quote: Mapped[str | None] = mapped_column(Text, default=None)
 
     story: Mapped[Story] = relationship(back_populates="relationships_")
@@ -145,7 +170,7 @@ class Relationship(Base):
     target_character: Mapped[Character] = relationship(
         back_populates="target_relationships", foreign_keys=[target_character_id]
     )
-    chapter: Mapped[Chapter] = relationship(back_populates="relationships_")
+    chapter: Mapped[Chapter | None] = relationship(back_populates="relationships_")
 
 
 class Issue(Base):
@@ -189,3 +214,24 @@ class LLMCall(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
     story: Mapped[Story | None] = relationship(back_populates="llm_calls")
+
+
+class IgnoredName(Base):
+    __tablename__ = "ignored_names"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    story_id: Mapped[int] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(300))
+
+    story: Mapped[Story] = relationship(back_populates="ignored_names")
+
+
+class AttributeRule(Base):
+    __tablename__ = "attribute_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    story_id: Mapped[int] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"))
+    attribute: Mapped[str] = mapped_column(String(100))
+    mode: Mapped[str] = mapped_column(String(20), default="strict")  # strict | can_change | ignore
+
+    story: Mapped[Story] = relationship(back_populates="attribute_rules")

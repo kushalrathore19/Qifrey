@@ -21,6 +21,7 @@ export interface Chapter {
   analyzed_hash: string | null;
   text?: string;
   summary?: string | null;
+  exclude_from_analysis?: boolean;
 }
 
 export interface CharacterBrief {
@@ -30,15 +31,23 @@ export interface CharacterBrief {
   description: string | null;
   aliases: string[];
   fact_count: number;
+  source: "ai" | "manual";
+  locked: boolean;
+  status: "active" | "planned";
+  notes: string | null;
+  color: string | null;
+  tags: string[];
 }
 
 export interface Fact {
   id: number;
   attribute: string;
   value: string;
-  chapter_id: number;
+  chapter_id: number | null;
   quote: string | null;
   confidence: number;
+  source: "ai" | "manual";
+  locked: boolean;
 }
 
 export interface Relationship {
@@ -56,8 +65,73 @@ export interface CharacterDetail {
   canonical_name: string;
   description: string | null;
   aliases: string[];
+  source: "ai" | "manual";
+  locked: boolean;
+  status: "active" | "planned";
+  notes: string | null;
+  color: string | null;
+  tags: string[];
   facts: Fact[];
   relationships: Relationship[];
+}
+
+export interface AttributeRule {
+  id?: number;
+  attribute: string;
+  mode: "strict" | "can_change" | "ignore";
+}
+
+export interface StorySettings {
+  confidence_threshold: number;
+  grammar_language: string;
+  disabled_grammar_rules: string[];
+}
+
+export interface CharacterCreateInput {
+  canonical_name: string;
+  description?: string | null;
+  aliases?: string[];
+  source?: "ai" | "manual";
+  locked?: boolean;
+  status?: "active" | "planned";
+  notes?: string | null;
+  color?: string | null;
+  tags?: string[];
+  initial_facts?: Array<{
+    attribute: string;
+    value: string;
+    quote?: string | null;
+    chapter_id?: number | null;
+    confidence?: number;
+    locked?: boolean;
+  }>;
+}
+
+export interface CharacterUpdateInput {
+  canonical_name?: string;
+  description?: string | null;
+  status?: "active" | "planned";
+  notes?: string | null;
+  color?: string | null;
+  tags?: string[];
+  locked?: boolean;
+}
+
+export interface FactCreateInput {
+  attribute: string;
+  value: string;
+  quote?: string | null;
+  chapter_id?: number | null;
+  confidence?: number;
+  locked?: boolean;
+}
+
+export interface FactUpdateInput {
+  attribute?: string;
+  value?: string;
+  quote?: string | null;
+  confidence?: number;
+  locked?: boolean;
 }
 
 export type IssueType = "contradiction" | "grammar";
@@ -214,7 +288,12 @@ export async function createChapter(
 
 export async function updateChapter(
   chapterId: number,
-  data: { title?: string; text?: string; index?: number },
+  data: {
+    title?: string;
+    text?: string;
+    index?: number;
+    exclude_from_analysis?: boolean;
+  },
 ): Promise<Chapter> {
   return request<Chapter>(`/chapters/${chapterId}`, {
     method: "PUT",
@@ -239,5 +318,156 @@ export async function checkChapterGrammar(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
+  });
+}
+
+export async function createCharacter(
+  storyId: number,
+  data: CharacterCreateInput,
+): Promise<CharacterDetail> {
+  return request<CharacterDetail>(`/stories/${storyId}/characters`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateCharacter(
+  characterId: number,
+  data: CharacterUpdateInput,
+): Promise<CharacterDetail> {
+  return request<CharacterDetail>(`/characters/${characterId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteCharacter(
+  characterId: number,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/characters/${characterId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function addAlias(
+  characterId: number,
+  name: string,
+): Promise<{ id: number; character_id: number; name: string; source: string }> {
+  return request<{ id: number; character_id: number; name: string; source: string }>(
+    `/characters/${characterId}/aliases`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+  );
+}
+
+export async function deleteAlias(
+  aliasId: number,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/aliases/${aliasId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function addFact(
+  characterId: number,
+  data: FactCreateInput,
+): Promise<Fact> {
+  return request<Fact>(`/characters/${characterId}/facts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateFact(
+  factId: number,
+  data: FactUpdateInput,
+): Promise<Fact> {
+  return request<Fact>(`/facts/${factId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteFact(
+  factId: number,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/facts/${factId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function mergeCharacters(
+  storyId: number,
+  sourceIds: number[],
+  targetId: number,
+): Promise<CharacterDetail> {
+  return request<CharacterDetail>(`/stories/${storyId}/characters/merge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source_ids: sourceIds, target_id: targetId }),
+  });
+}
+
+export async function ignoreCharacter(
+  characterId: number,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/characters/${characterId}/ignore`, {
+    method: "POST",
+  });
+}
+
+export async function getAttributeRules(
+  storyId: number,
+): Promise<AttributeRule[]> {
+  return request<AttributeRule[]>(`/stories/${storyId}/attribute-rules`);
+}
+
+export async function updateAttributeRules(
+  storyId: number,
+  rules: AttributeRule[],
+): Promise<AttributeRule[]> {
+  return request<AttributeRule[]>(`/stories/${storyId}/attribute-rules`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(rules),
+  });
+}
+
+export async function getStorySettings(
+  storyId: number,
+): Promise<StorySettings> {
+  return request<StorySettings>(`/stories/${storyId}/settings`);
+}
+
+export async function updateStorySettings(
+  storyId: number,
+  data: Partial<StorySettings>,
+): Promise<StorySettings> {
+  return request<StorySettings>(`/stories/${storyId}/settings`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function getExportUrl(storyId: number, format: "json" | "md"): string {
+  return `${BASE_URL}/stories/${storyId}/export?format=${format}`;
+}
+
+export async function importStoryBible(
+  storyId: number,
+  data: unknown,
+): Promise<{ detail: string }> {
+  return request<{ detail: string }>(`/stories/${storyId}/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
   });
 }
